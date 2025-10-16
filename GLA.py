@@ -1,5 +1,6 @@
 import re #regurni izrazi
 import sys, io
+import os, json
 
 def parsiranje():
     datoteka = [l.strip() for l in sys.stdin.readlines() if l.strip() != ""]
@@ -82,17 +83,175 @@ def prosiri_pravila(pravila, definicije): #prosljedujem prosirene definicije
         pravilo["regex"] = regex
     return pravila
 
+class Automat:
+    def __init__(self): # konstruktor
+        self.prijelazi = {}
+        self.br_stanja = 0
+    def novo_stanje(self): #stvara novo stanje automata
+        s = self.br_stanja
+        self.br_stanja += 1
+        self.prijelazi[s] = {} # stvaram kljuc vrijednost za novo stanje u rijecniku - prijelazi
+        return s
+    def dodaj_prijelaz(self, a, b, simbol):
+        if a not in self.prijelazi: # ako ne postoji stvaram kljuc-vrijednost
+            self.prijelazi[a] = {}
+        if simbol not in self.prijelazi[a]:
+            self.prijelazi[a][simbol] = []
+        self.prijelazi[a][simbol].append(b)  # unutra stavljam b
+    def dodaj_epsilon_prijelaz(self, a, b):
+        self.dodaj_prijelaz(a, b, '$') # dodaje prijalaz bez da cita znak, $ = epsilon
+
+def pretvori(izraz, automat):
+    def je_operator(izraz, i):
+        br = 0
+        while i - 1 >= 0 and izraz[i - 1] == '\\':
+            br = br + 1
+            i = i - 1
+        return br % 2 == 0
+    def interpretiraj_escape(znak):
+        if znak == 't': return '\t'
+        elif znak == 'n': return '\n'
+        elif znak == '_': return ' '
+        else: return znak
+    def nadji_zatvorenu_zagradu(izraz, i):
+        br = 0
+        for j in range(i, len(izraz)):
+            if izraz[j] == '(' and je_operator(izraz, j):
+                br += 1
+            elif izraz[j] == ')' and je_operator(izraz, j):
+                br -= 1
+                if br == 0:
+                    return j
+        raise ValueError("Nedostaje zatvorena zagrada!")
+    def spoji_izbore(izbori, ostatak, automat):
+        if ostatak:
+            izbori.append(ostatak)
+        lijevo_stanje = automat.novo_stanje()
+        desno_stanje = automat.novo_stanje()
+        for dio in izbori:
+            (a, b) = pretvori(dio, automat)
+            automat.dodaj_epsilon_prijelaz(lijevo_stanje, a)
+            automat.dodaj_epsilon_prijelaz(b, desno_stanje)
+        return (lijevo_stanje, desno_stanje)
+    
+    izbori = []
+    br_zagrada = 0
+    for i in range(len(izraz)):
+        if izraz[i] == '(' and je_operator(izraz, i):
+            br_zagrada = br_zagrada + 1
+        elif izraz[i] == ')' and je_operator(izraz, i):
+            br_zagrada = br_zagrada - 1
+        elif br_zagrada == 0 and izraz[i] == '|' and je_operator(izraz, i):
+            izbori.append(izraz[:i])
+            ostatak = izraz[i + 1:]
+            return spoji_izbore(izbori, ostatak, automat)
+    lijevo_stanje = automat.novo_stanje()
+    desno_stanje = automat.novo_stanje()
+    prefiksirano = False
+    zadnje_stanje = lijevo_stanje
+    i = 0
+    while i < len(izraz):
+        if prefiksirano:
+            prefiksirano = False
+            prijelazni_znak = interpretiraj_escape(izraz[i])
+            a = automat.novo_stanje()
+            b = automat.novo_stanje()
+            automat.dodaj_prijelaz(a, b, prijelazni_znak)
+        elif izraz[i] == '\\':
+            prefiksirano = True
+            i += 1
+            continue
+        elif izraz[i] != '(':
+            a = automat.novo_stanje()
+            b = automat.novo_stanje()
+            if izraz[i] == '$':
+                automat.dodaj_epsilon_prijelaz(a, b)
+            else:
+                automat.dodaj_prijelaz(a, b, izraz[i])
+        else:
+            j = nadji_zatvorenu_zagradu(izraz, i)
+            podizraz = izraz[i + 1:j]
+            (a, b) = pretvori(podizraz, automat)
+            i = j
+        if i + 1 < len(izraz) and izraz[i + 1] == '*':
+            x = a
+            y = b
+            a = automat.novo_stanje()
+            b = automat.novo_stanje()
+            automat.dodaj_epsilon_prijelaz(a, x)
+            automat.dodaj_epsilon_prijelaz(y, b)
+            automat.dodaj_epsilon_prijelaz(a, b)
+            automat.dodaj_epsilon_prijelaz(y, x)
+            i += 1 
+        automat.dodaj_epsilon_prijelaz(zadnje_stanje, a)
+        zadnje_stanje = b
+        i += 1
+    automat.dodaj_epsilon_prijelaz(zadnje_stanje, desno_stanje)
+    return (lijevo_stanje, desno_stanje)
+
+def generiraj_podatke_py(stanja, pravila, automati, prijelazi):
+    # osiguraj da postoji folder analizator/
+    os.makedirs("analizator", exist_ok=True)
+    putanja = "analizator/podaci.py"
+
+    # pročitaj postojeći komentar (sve do prve prazne linije nakon """ ... """)
+    if os.path.exists(putanja):
+        with open(putanja, "r", encoding="utf-8") as f:
+            sadrzaj = f.read()
+        # traži kraj docstringa """
+        kraj_docstringa = sadrzaj.find('"""', 3)
+        if kraj_docstringa != -1:
+            komentar = sadrzaj[:kraj_docstringa+3] + "\n\n"
+        else:
+            komentar = '"""\nAUTOMATSKI GENERIRAN DIO ISPOD\n"""\n\n'
+    else:
+        komentar = '"""\nAUTOMATSKI GENERIRAN DIO ISPOD\n"""\n\n'
+
+    pocetno_stanje = stanja[0] if stanja else None
+
+    # pravila po stanju
+    pravila_po_stanju = {}
+    for idx, p in enumerate(pravila):
+        s = p["stanje"]
+        pravila_po_stanju.setdefault(s, []).append(idx)
+
+    # novi sadržaj
+    novi_sadrzaj = f'''{komentar}
+stanja = {repr(stanja)}
+
+pocetno_stanje = {repr(pocetno_stanje)}
+
+pravila = {json.dumps(pravila, indent=4, ensure_ascii=False)}
+
+pravila_po_stanju = {json.dumps(pravila_po_stanju, indent=4, ensure_ascii=False)}
+
+automati = {json.dumps(automati, indent=4, ensure_ascii=False)}
+
+prijelazi = {json.dumps(prijelazi, indent=4, ensure_ascii=False)}
+'''
+
+    # upiši novi sadržaj (prebriši samo dio ispod komentara)
+    with open(putanja, "w", encoding="utf-8") as f:
+        f.write(novi_sadrzaj)
+
+
+
 if __name__ == "__main__":
     defs, stanja, u_znakovi, pravila = parsiranje()
-    print("DEF: ", defs)
-    print("STANJA: ", stanja)
-    print("U_ZNAKOVI: ", u_znakovi)
-    print("PRAVILA: ", pravila)
-
     defs = prosiri_definicije(defs)
     pravila = prosiri_pravila(pravila, defs)
 
-    print("DEF: ", defs)
-    print("STANJA: ", stanja)
-    print("U_ZNAKOVI: ", u_znakovi)
-    print("PRAVILA: ", pravila)
+    automati = []
+    prijelazi = {}
+
+    # generiraj automat za svako pravilo
+    for idx, p in enumerate(pravila):
+        a = Automat()
+        s, e = pretvori(p["regex"], a)
+        automati.append({"pocetno": s, "prihvatljivo": e})
+        prijelazi[idx] = a.prijelazi
+
+    # generiraj datoteku s podacima
+    generiraj_podatke_py(stanja, pravila, automati, prijelazi)
+
+    print("✅ Datoteka 'analizator/podaci.py' uspješno generirana.")
