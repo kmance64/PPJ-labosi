@@ -24,6 +24,10 @@ def epsilon_okruzenje(br_pravilo, trenutna_stanja):
 
 def pomak(br_pravilo, stanja, znak):
     # pomak iz svih aktivnih stanja u sljedeca stanja citanjem znaka
+    # razlioka izmedu znaka dolara i epsilon prijelaza
+    if znak == '$':
+        return set()
+
     rez = set()
     for s in stanja:
         rez |= prijelaz(br_pravilo, s, znak)
@@ -40,10 +44,7 @@ def akcija(br_pravilo):
     else:
         ime_leksicke_jedinke = pravilo.get('uniformni_znak')
 
-    if pravilo.get('dodatne_akcije') == 'NOVI_REDAK':
-        novi_red = True
-    else:
-        novi_red = False
+    novi_red = 'NOVI_REDAK' in (pravilo.get('dodatne_akcije') or [])
 
     sljedece_stanje = pravilo.get('sljedece_stanje', None)
 
@@ -59,6 +60,14 @@ def prihvatljivo(br_pravilo, stanja):
 
 def main():
     kod = sys.stdin.read()  # cijeli ulazni program
+
+    # da mi se ne prikazuju errori na windowsima
+    kod = kod.replace('\r\n', '\n').replace('\r', '\n')
+
+    # micanje zadnjeg znaka za novi red da se ne baca error bezveze
+    if kod.endswith('\n'):
+        kod = kod[:-1]
+
     n = len(kod)
 
     # stanja leksickog analizatora
@@ -118,7 +127,7 @@ def main():
             # oporavak od pogreske
             krivo = kod[pocetak]
             print(
-                f"Leksička pogreška na liniji {redak}: {krivo}", file=sys.stderr)
+                f"Leksička pogreška na liniji {redak}: {repr(krivo)} (ord={ord(krivo)})", file=sys.stderr)
             if krivo == '\n':
                 redak += 1
             pocetak += 1
@@ -130,7 +139,7 @@ def main():
             koristeno_pravilo)
 
         if vracanje:
-            kraj -= vracanje
+            kraj = min(pocetak + vracanje, n)
             if kraj < pocetak:
                 kraj = pocetak
 
@@ -141,7 +150,10 @@ def main():
             print(f"{ime_leksicke_jedinke} {linija} {leksicka_jedinka}")
 
         if novi_red:
-            redak += leksicka_jedinka.count('\n')
+            dodaj = leksicka_jedinka.count('\n')
+            if dodaj == 0:
+                dodaj = 1  # Cover ε-accept of the '...($|\n)' newline rule
+            redak += dodaj
 
         if sljedece_stanje:
             trenutno_stanje = sljedece_stanje
