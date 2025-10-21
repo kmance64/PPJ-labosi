@@ -1,7 +1,6 @@
 import re  # regurni izrazi
 import sys
 import os
-import json
 
 
 def parsiranje():
@@ -129,8 +128,7 @@ def obogati_pravila(pravila):
         p["dodatne_akcije"] = dodatne
         p["sljedece_stanje"] = slj_stanje
         p["vracanje"] = vracanje
-        # možeš ukloniti sirovi popis ako želiš:
-        # del p["akcije"]
+ 
     return pravila
 
 
@@ -253,28 +251,19 @@ def pretvori(izraz, automat):
     automat.dodaj_epsilon_prijelaz(zadnje_stanje, desno_stanje)
     return (lijevo_stanje, desno_stanje)
 
+def generiraj_la_py(stanja, pravila, automati, prijelazi):
+    """
+    Generira analizator/LA.py iz predloška tako da umetne sve potrebne podatke.
+    """
+    with open("analizator/predlozak.py", "r", encoding="utf-8") as f:
+        predlozak = f.read()
 
-def generiraj_podatke_py(stanja, pravila, automati, prijelazi):
-    # osiguraj da postoji folder analizator/
-    os.makedirs("analizator", exist_ok=True)
-    putanja = "analizator/podaci.py"
+    if "import podaci" in predlozak:
+        predlozak = predlozak.replace("import podaci", "# Podaci ugrađeni iz generatora ispod ↓")
 
-    # pročitaj postojeći komentar (sve do prve prazne linije nakon """ ... """)
-    if os.path.exists(putanja):
-        with open(putanja, "r", encoding="utf-8") as f:
-            sadrzaj = f.read()
-        # traži kraj docstringa """
-        kraj_docstringa = sadrzaj.find('"""', 3)
-        if kraj_docstringa != -1:
-            komentar = sadrzaj[:kraj_docstringa+3] + "\n\n"
-        else:
-            komentar = '"""\nAUTOMATSKI GENERIRAN DIO ISPOD\n"""\n\n'
-    else:
-        komentar = '"""\nAUTOMATSKI GENERIRAN DIO ISPOD\n"""\n\n'
+    umetni_iza = "# Podaci ugrađeni iz generatora ispod ↓"
 
     pocetno_stanje = stanja[0] if stanja else None
-
-    # pravila po stanju
     pravila_po_stanju = {}
     for idx, p in enumerate(pravila):
         s = p["stanje"]
@@ -282,25 +271,24 @@ def generiraj_podatke_py(stanja, pravila, automati, prijelazi):
     for s in stanja:
         pravila_po_stanju.setdefault(s, [])
 
-    # novi sadržaj
-    novi_sadrzaj = f'''{komentar}
+    podaci_code = f"""
+# ================== Ugrađeni podaci (generirano iz GLA.py) ==================
 stanja = {repr(stanja)}
-
 pocetno_stanje = {repr(pocetno_stanje)}
-
 pravila = {repr(pravila)}
-
 pravila_po_stanju = {repr(pravila_po_stanju)}
-
 automati = {repr(automati)}
-
 prijelazi = {repr(prijelazi)}
-'''
+# ===========================================================================
 
-    # upiši novi sadržaj (prebriši samo dio ispod komentara)
-    with open(putanja, "w", encoding="utf-8") as f:
-        f.write(novi_sadrzaj)
+"""
+    rezultat = predlozak.replace(umetni_iza, umetni_iza + "\n" + podaci_code)
 
+    os.makedirs("analizator", exist_ok=True)
+    with open("analizator/LA.py", "w", encoding="utf-8") as f:
+        f.write(rezultat)
+
+    print("✅ Datoteka analizator/LA.py uspješno generirana.")
 
 if __name__ == "__main__":
     defs, stanja, u_znakovi, pravila = parsiranje()
@@ -311,7 +299,6 @@ if __name__ == "__main__":
     automati = []
     prijelazi = {}
 
-    # generiraj automat za svako pravilo
     for idx, p in enumerate(pravila):
         a = Automat()
         s, e = pretvori(p["regex"], a)
@@ -319,7 +306,5 @@ if __name__ == "__main__":
         prijelazi[idx] = a.prijelazi
         pravila[idx]["br_automat"] = idx
 
-    # generiraj datoteku s podacima
-    generiraj_podatke_py(stanja, pravila, automati, prijelazi)
+    generiraj_la_py(stanja, pravila, automati, prijelazi)
 
-    print("✅ Datoteka 'analizator/podaci.py' uspješno generirana.")
