@@ -1,6 +1,8 @@
 import re  # regularni izrazi
 import sys
 
+epsilon = '<<EPS>>'  # posebni znak za epsilon da se ne mijesa sa obicnim znakom dolara
+
 
 def parsiranje():
     datoteka = [l.strip() for l in sys.stdin.readlines() if l.strip() != ""]
@@ -136,7 +138,7 @@ class Automat:
 
     def dodaj_epsilon_prijelaz(self, a, b):
         # dodaje prijalaz bez da cita znak, $ = epsilon
-        self.dodaj_prijelaz(a, b, '$')
+        self.dodaj_prijelaz(a, b, epsilon)
 
 
 def pretvori(izraz, automat):

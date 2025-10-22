@@ -1,5 +1,7 @@
 import sys
 
+epsilon = '<<EPS>>'  # ista konstanta kao u gla za epsilon
+
 # podaci iz generatora
 
 
@@ -16,7 +18,7 @@ def epsilon_okruzenje(br_pravilo, trenutna_stanja):
     while stog:
         stanje = stog.pop()
         # znak dolara oznacava epsilon prijelaz
-        for st in prijelaz(br_pravilo, stanje, '$'):
+        for st in prijelaz(br_pravilo, stanje, epsilon):
             if st not in Y:
                 Y.add(st)
                 stog.append(st)
@@ -25,10 +27,6 @@ def epsilon_okruzenje(br_pravilo, trenutna_stanja):
 
 def pomak(br_pravilo, stanja, znak):
     # pomak iz svih aktivnih stanja u sljedeca stanja citanjem znaka
-    # razlioka izmedu znaka dolara i epsilon prijelaza
-    if znak == '$':
-        return set()
-
     rez = set()
     for s in stanja:
         rez |= prijelaz(br_pravilo, s, znak)
