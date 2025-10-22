@@ -1,6 +1,5 @@
-import re  # regurni izrazi
+import re  # regularni izrazi
 import sys
-import os
 
 
 def parsiranje():
@@ -15,21 +14,18 @@ def parsiranje():
     while i < len(datoteka):
         linija = datoteka[i]
 
-        # faza = 1 > regularne definicije
+        # faza 1 - regularne definicije
         if faza == 1:
             if linija.startswith("%X"):  # ako linija pocinje s %X vraca true
                 faza = 2
                 continue
             # ([^}]+) hvata sve znakove jedno ili vise puta; \s+ razmaci,tabovi,novi red; (.*) ostatak linije
             m = re.match(r"\{([^}]+)\}\s+(.*)", linija)
-            if m:           # ako je match true - dobivam m.group
-                ime = m.group(1).strip()
-                izraz = m.group(2).strip()
-                regularne_definicije[ime] = izraz
-            else:
-                raise ValueError(f"Pogreška definicije: {linija}")
+            ime = m.group(1).strip()
+            izraz = m.group(2).strip()
+            regularne_definicije[ime] = izraz
 
-        # faza = 2 > stanja i uniformni znakovi
+        # faza 2 - stanja i uniformni znakovi
         elif faza == 2:
             if linija.startswith("%X"):
                 stanja = linija.split()[1:]  # split, uzmi sve nakon prvog
@@ -37,21 +33,15 @@ def parsiranje():
                 uniformni_znakovi = linija.split()[1:]
                 faza = 3
 
-        # faza = 3 > pravila
+        # faza 3 - pravila
         elif faza == 3:
             if linija.startswith("<"):
                 # sva stanja pocinju sa <S_stanje>
                 m = re.match(r"<([^>]+)>(.*)", linija)
-                if not m:
-                    raise ValueError(f"Neispravno pravilo: {linija}")
                 stanje = m.group(1).strip()
                 regex = m.group(2).strip()
-                i += 1
+                i += 2
                 akcije = []  # unutar {} zagrada,  svka u novom redu
-                if datoteka[i] != "{":
-                    raise ValueError(
-                        f"Nedostaje zagrada nakon pravila: {linija}")
-                i += 1
                 while i < len(datoteka) and datoteka[i] != "}":
                     akcije.append(datoteka[i].strip())
                     i += 1
@@ -65,10 +55,10 @@ def parsiranje():
 
 
 def prosiri_definicije(definicije):
-    promijenjeno = True  # Kada se nista u definicija ne promijeni znaci da je sve promijenjeno
+    promijenjeno = True  # kada se nista u definicija ne promijeni znaci da je sve promijenjeno
     while promijenjeno:
         promijenjeno = False
-        # list radi kopiju definicija - inace dolazi do greske jer mijenjam rječnik kroz koji iteriram
+        # list radi kopiju definicija - inace dolazi do greske jer mijenjam rjecnik kroz koji iteriram
         for ime, izraz in list(definicije.items()):
             novi_izraz = izraz
             # vraca listu svih matcheva
@@ -96,30 +86,23 @@ def prosiri_pravila(pravila, definicije):  # prosljedujem prosirene definicije
     return pravila
 
 
-def obogati_pravila(pravila):
-    """Pretvori 'akcije' u:
-       - uniformni_znak: str | '-'
-       - dodatne_akcije: list[str] (npr. ['NOVI_REDAK'])
-       - sljedece_stanje: str | None
-       - vracanje: int
-    """
+def formatiraj_pravila(pravila):
+    # uniformni_znak je str ili '-', dodatne_akcije su list[str], sljedece_stanje je str ili None, vracanje je int
     for p in pravila:
         akc = [x.strip() for x in p.get("akcije", []) if x.strip()]
         token = akc[0] if akc else "-"
         dodatne = []
         slj_stanje = None
-        vracanje = 0
+        vracanje = None
 
         for a in akc[1:]:
             if a == "NOVI_REDAK":
                 dodatne.append("NOVI_REDAK")
             elif a.startswith("UDJI_U_STANJE"):
-                # format: UDJI_U_STANJE S_ime
                 parts = a.split()
                 if len(parts) >= 2:
                     slj_stanje = parts[1]
             elif a.startswith("VRATI_SE"):
-                # format: VRATI_SE k
                 parts = a.split()
                 if len(parts) >= 2 and parts[1].isdigit():
                     vracanje = int(parts[1])
@@ -128,7 +111,7 @@ def obogati_pravila(pravila):
         p["dodatne_akcije"] = dodatne
         p["sljedece_stanje"] = slj_stanje
         p["vracanje"] = vracanje
- 
+
     return pravila
 
 
@@ -157,87 +140,155 @@ class Automat:
 
 
 def pretvori(izraz, automat):
-    def je_operator(izraz, i):
-        br = 0
-        while i - 1 >= 0 and izraz[i - 1] == '\\':
-            br = br + 1
-            i = i - 1
-        return br % 2 == 0
+    SVI_ZNAKOVI = [chr(c) for c in range(32, 127)] + \
+        ['\t']  # asci kodovi bez novog reda da se ne mijesa sa novim redovima
 
-    def interpretiraj_escape(znak):
-        if znak == 't':
-            return '\t'
-        elif znak == 'n':
-            return '\n'
-        elif znak == '_':
-            return ' '
-        else:
-            return znak
+    def je_operator(izraz, i):
+        # vraca true ako znak nije escapean
+        br = 0
+        k = i - 1
+        while k >= 0 and izraz[k] == '\\':
+            br += 1
+            k -= 1
+        return (br % 2) == 0
 
     def nadji_zatvorenu_zagradu(izraz, i):
+        # vraca indeks uparene zatvorene zagrade
         br = 0
-        for j in range(i, len(izraz)):
-            if izraz[j] == '(' and je_operator(izraz, j):
+        u_klasi = False
+        j = i
+        while j < len(izraz):
+            c = izraz[j]
+            if c == '[' and je_operator(izraz, j) and not u_klasi:
+                u_klasi = True
+            elif c == ']' and je_operator(izraz, j) and u_klasi:
+                u_klasi = False
+            elif not u_klasi and c == '(' and je_operator(izraz, j):
                 br += 1
-            elif izraz[j] == ')' and je_operator(izraz, j):
+            elif not u_klasi and c == ')' and je_operator(izraz, j):
                 br -= 1
                 if br == 0:
                     return j
-        raise ValueError("Nedostaje zatvorena zagrada!")
+            j += 1
+        return None
 
-    def spoji_izbore(izbori, ostatak, automat):
+    def nadji_kraj_klase(izraz, i):
+        # i pokazuje na [ i pokusava pronac zatvorenu ], ako ne nadje onda je otvorena zagrada obican znak
+        j = i + 1
+        while j < len(izraz):
+            if izraz[j] == ']' and je_operator(izraz, j):
+                return j
+            j += 1
+        return None
+
+    def procitaj_escape(izraz, i):
+        if i + 1 >= len(izraz):
+            return '\\', i + 1
+        nxt = izraz[i + 1]
+        if nxt == 't':
+            return '\t', i + 2
+        if nxt == 'n':
+            return '\n', i + 2
+        if nxt == '_':
+            return ' ', i + 2
+        return nxt, i + 2
+
+    def napravi_klasu(izraz, i):
+        # dozvoljeni znakovi za pojedinu klasu
+        j = nadji_kraj_klase(izraz, i)
+        if j is None:
+            # obicni znak [
+            return {'['}, i + 1
+
+        s = i + 1
+        negirano = False
+        if s < j and izraz[s] == '^' and je_operator(izraz, s):
+            negirano = True
+            s += 1
+
+        dozvoljeno = set()
+        k = s
+        while k < j:
+            if izraz[k] == '\\':
+                ch, k = procitaj_escape(izraz, k)
+                dozvoljeno.add(ch)
+            else:
+                dozvoljeno.add(izraz[k])
+                k += 1
+
+        if negirano:
+            zabranjeno = dozvoljeno | {'\n'}
+            dozvoljeno = set(SVI_ZNAKOVI) - zabranjeno
+
+        return dozvoljeno, j + 1
+
+    def spoji_izbore(izbori, ostatak):
         if ostatak:
             izbori.append(ostatak)
-        lijevo_stanje = automat.novo_stanje()
-        desno_stanje = automat.novo_stanje()
+        lijevo = automat.novo_stanje()
+        desno = automat.novo_stanje()
         for dio in izbori:
-            (a, b) = pretvori(dio, automat)
-            automat.dodaj_epsilon_prijelaz(lijevo_stanje, a)
-            automat.dodaj_epsilon_prijelaz(b, desno_stanje)
-        return (lijevo_stanje, desno_stanje)
+            a, b = pretvori(dio, automat)
+            automat.dodaj_epsilon_prijelaz(lijevo, a)
+            automat.dodaj_epsilon_prijelaz(b, desno)
+        return lijevo, desno
 
+    # odvoji prema znaku |
     izbori = []
     br_zagrada = 0
+    u_klasi = False
     for i in range(len(izraz)):
-        if izraz[i] == '(' and je_operator(izraz, i):
-            br_zagrada = br_zagrada + 1
-        elif izraz[i] == ')' and je_operator(izraz, i):
-            br_zagrada = br_zagrada - 1
-        elif br_zagrada == 0 and izraz[i] == '|' and je_operator(izraz, i):
+        c = izraz[i]
+        if c == '[' and je_operator(izraz, i) and not u_klasi:
+            u_klasi = True
+        elif c == ']' and je_operator(izraz, i) and u_klasi:
+            u_klasi = False
+        elif not u_klasi and c == '(' and je_operator(izraz, i):
+            br_zagrada += 1
+        elif not u_klasi and c == ')' and je_operator(izraz, i):
+            br_zagrada -= 1
+        elif not u_klasi and br_zagrada == 0 and c == '|' and je_operator(izraz, i):
             izbori.append(izraz[:i])
             ostatak = izraz[i + 1:]
-            return spoji_izbore(izbori, ostatak, automat)
+            return spoji_izbore(izbori, ostatak)
+
     lijevo_stanje = automat.novo_stanje()
     desno_stanje = automat.novo_stanje()
-    prefiksirano = False
-    zadnje_stanje = lijevo_stanje
+    zadnje = lijevo_stanje
     i = 0
+
     while i < len(izraz):
-        if prefiksirano:
-            prefiksirano = False
-            prijelazni_znak = interpretiraj_escape(izraz[i])
+        a = b = None
+
+        if izraz[i] == '\\':
+            ch, i2 = procitaj_escape(izraz, i)
             a = automat.novo_stanje()
             b = automat.novo_stanje()
-            automat.dodaj_prijelaz(a, b, prijelazni_znak)
-        elif izraz[i] == '\\':
-            prefiksirano = True
-            i += 1
-            continue
-        elif izraz[i] != '(':
+            automat.dodaj_prijelaz(a, b, ch)
+            i = i2
+        elif izraz[i] == '(' and je_operator(izraz, i):
+            j = nadji_zatvorenu_zagradu(izraz, i)
+            pod = izraz[i + 1:j]
+            a, b = pretvori(pod, automat)
+            i = j + 1
+        elif izraz[i] == '[' and je_operator(izraz, i):
+            dozv, i2 = napravi_klasu(izraz, i)
             a = automat.novo_stanje()
             b = automat.novo_stanje()
-            if izraz[i] == '$':
+            for ch in dozv:
+                automat.dodaj_prijelaz(a, b, ch)
+            i = i2
+        else:
+            a = automat.novo_stanje()
+            b = automat.novo_stanje()
+            if izraz[i] == '$' and je_operator(izraz, i):
                 automat.dodaj_epsilon_prijelaz(a, b)
             else:
                 automat.dodaj_prijelaz(a, b, izraz[i])
-        else:
-            j = nadji_zatvorenu_zagradu(izraz, i)
-            podizraz = izraz[i + 1:j]
-            (a, b) = pretvori(podizraz, automat)
-            i = j
-        if i + 1 < len(izraz) and izraz[i + 1] == '*':
-            x = a
-            y = b
+            i += 1
+
+        if i < len(izraz) and izraz[i] == '*' and je_operator(izraz, i):
+            x, y = a, b
             a = automat.novo_stanje()
             b = automat.novo_stanje()
             automat.dodaj_epsilon_prijelaz(a, x)
@@ -245,23 +296,18 @@ def pretvori(izraz, automat):
             automat.dodaj_epsilon_prijelaz(a, b)
             automat.dodaj_epsilon_prijelaz(y, x)
             i += 1
-        automat.dodaj_epsilon_prijelaz(zadnje_stanje, a)
-        zadnje_stanje = b
-        i += 1
-    automat.dodaj_epsilon_prijelaz(zadnje_stanje, desno_stanje)
-    return (lijevo_stanje, desno_stanje)
+
+        automat.dodaj_epsilon_prijelaz(zadnje, a)
+        zadnje = b
+
+    automat.dodaj_epsilon_prijelaz(zadnje, desno_stanje)
+    return lijevo_stanje, desno_stanje
+
 
 def generiraj_la_py(stanja, pravila, automati, prijelazi):
-    """
-    Generira analizator/LA.py iz predloška tako da umetne sve potrebne podatke.
-    """
+    # generira LA.py iz predloška tako da unutra stavi sve potrebne podatke
     with open("analizator/predlozak.py", "r", encoding="utf-8") as f:
         predlozak = f.read()
-
-    if "import podaci" in predlozak:
-        predlozak = predlozak.replace("import podaci", "# Podaci ugrađeni iz generatora ispod ↓")
-
-    umetni_iza = "# Podaci ugrađeni iz generatora ispod ↓"
 
     pocetno_stanje = stanja[0] if stanja else None
     pravila_po_stanju = {}
@@ -272,29 +318,24 @@ def generiraj_la_py(stanja, pravila, automati, prijelazi):
         pravila_po_stanju.setdefault(s, [])
 
     podaci_code = f"""
-# ================== Ugrađeni podaci (generirano iz GLA.py) ==================
 stanja = {repr(stanja)}
 pocetno_stanje = {repr(pocetno_stanje)}
 pravila = {repr(pravila)}
 pravila_po_stanju = {repr(pravila_po_stanju)}
 automati = {repr(automati)}
 prijelazi = {repr(prijelazi)}
-# ===========================================================================
-
 """
-    rezultat = predlozak.replace(umetni_iza, umetni_iza + "\n" + podaci_code)
+    rezultat = predlozak.replace("# podaci iz generatora", podaci_code)
 
-    os.makedirs("analizator", exist_ok=True)
     with open("analizator/LA.py", "w", encoding="utf-8") as f:
         f.write(rezultat)
 
-    print("✅ Datoteka analizator/LA.py uspješno generirana.")
 
 if __name__ == "__main__":
     defs, stanja, u_znakovi, pravila = parsiranje()
     defs = prosiri_definicije(defs)
     pravila = prosiri_pravila(pravila, defs)
-    pravila = obogati_pravila(pravila)
+    pravila = formatiraj_pravila(pravila)
 
     automati = []
     prijelazi = {}
@@ -307,4 +348,3 @@ if __name__ == "__main__":
         pravila[idx]["br_automat"] = idx
 
     generiraj_la_py(stanja, pravila, automati, prijelazi)
-
