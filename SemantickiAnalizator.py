@@ -114,13 +114,125 @@ def print_tree(node, depth=0):
     print(f"{indent})")
 
 
+
+
+# ===============================
+# STRUKTURNA VALIDACIJA STABLA
+# ===============================
+
+GRAMMAR = {
+    "<prijevodna_jedinica>": [
+        ["<vanjska_deklaracija>"]
+    ],
+    "<vanjska_deklaracija>": [
+        ["<definicija_funkcije>"]
+    ],
+    "<definicija_funkcije>": [
+        ["<ime_tipa>", "IDN", "L_ZAGRADA", "KR_VOID", "D_ZAGRADA", "<slozena_naredba>"]
+    ],
+    "<ime_tipa>": [
+        ["<specifikator_tipa>"]
+    ],
+    "<specifikator_tipa>": [
+        ["KR_INT"],
+        ["KR_CHAR"],
+        ["KR_VOID"]
+    ],
+    "<slozena_naredba>": [
+        ["L_VIT_ZAGRADA", "<lista_naredbi>", "D_VIT_ZAGRADA"]
+    ],
+    "<lista_naredbi>": [
+        ["<naredba>"]
+    ],
+    "<naredba>": [
+        ["<naredba_skoka>"]
+    ],
+    "<naredba_skoka>": [
+        ["KR_RETURN", "<izraz>", "TOCKAZAREZ"]
+    ],
+
+    # lanac izraza
+    "<izraz>": [["<izraz_pridruzivanja>"]],
+    "<izraz_pridruzivanja>": [["<log_ili_izraz>"]],
+    "<log_ili_izraz>": [["<log_i_izraz>"]],
+    "<log_i_izraz>": [["<bin_ili_izraz>"]],
+    "<bin_ili_izraz>": [["<bin_xili_izraz>"]],
+    "<bin_xili_izraz>": [["<bin_i_izraz>"]],
+    "<bin_i_izraz>": [["<jednakosni_izraz>"]],
+    "<jednakosni_izraz>": [["<odnosni_izraz>"]],
+    "<odnosni_izraz>": [["<aditivni_izraz>"]],
+    "<aditivni_izraz>": [["<multiplikativni_izraz>"]],
+    "<multiplikativni_izraz>": [["<cast_izraz>"]],
+    "<cast_izraz>": [["<unarni_izraz>"]],
+    "<unarni_izraz>": [["<postfiks_izraz>"]],
+    "<postfiks_izraz>": [["<primarni_izraz>"]],
+    "<primarni_izraz>": [["IDN"]],
+}
+
+
+def validate_node(node):
+    """Provjerava je li čvorova djeca odgovaraju jednoj od dozvoljenih produkcija."""
+
+    # terminal – nema djece -> OK
+    if not node.is_nonterminal:
+        if len(node.children) != 0:
+            raise ValueError(f"Terminal {node.name} ne smije imati djecu!")
+        return
+
+    expected_productions = GRAMMAR.get(node.name)
+
+    # ako neneterminal nije u gramatiki -> preskoči (ili baci grešku)
+    if expected_productions is None:
+        # možeš ovdje staviti raise ako želiš striktno
+        return
+
+    # sakupi imena djece
+    actual = []
+    for c in node.children:
+        if c.is_nonterminal:
+            actual.append(c.name)
+        else:
+            actual.append(c.token)
+
+    # provjeri svaku produkciju
+    for prod in expected_productions:
+        if prod == actual:
+            # MATCH
+            for child in node.children:
+                validate_node(child)
+            return
+
+    # ako nijedna produkcija se ne poklapa → greška
+    raise ValueError(
+        f"Struktura čvora {node.name} nije ispravna!\n"
+        f" Djeca: {actual}\n"
+        f" Dozvoljeno: {expected_productions}"
+    )
+
+
+def validate_tree(root):
+    try:
+        validate_node(root)
+        print("STRUKTURA JE ISPRAVNA")
+    except ValueError as e:
+        print("STRUKTURNI PROBLEM:")
+        print(e)
+
+
+
+# ===============================
+# MAIN
+# ===============================
+
 def main():
     data = sys.stdin.read().splitlines()
     if not data:
         print("Nema ulaznih podataka.", file=sys.stderr)
         return
     root = parse_indented(data)
-    print_tree(root)
+    #print_tree(root)
+
+    validate_tree(root)
 
 if __name__ == "__main__":
     main()
