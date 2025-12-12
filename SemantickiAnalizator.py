@@ -120,15 +120,156 @@ def print_tree(node, depth=0):
 # STRUKTURNA VALIDACIJA STABLA
 # ===============================
 
+# Svaki neneterminal mapira na listu produkcija; svaka produkcija je lista simbola.
 GRAMMAR = {
+    # --- izrazi (chain of expressions) ---
+    "<primarni_izraz>": [
+        ["IDN"],
+        ["BROJ"],
+        ["ZNAK"],
+        ["NIZ_ZNAKOVA"],
+        ["L_ZAGRADA", "<izraz>", "D_ZAGRADA"]
+    ],
+    "<postfiks_izraz>": [
+        ["<primarni_izraz>"],
+        ["<postfiks_izraz>", "L_UGL_ZAGRADA", "<izraz>", "D_UGL_ZAGRADA"],
+        ["<postfiks_izraz>", "L_ZAGRADA", "D_ZAGRADA"],
+        ["<postfiks_izraz>", "L_ZAGRADA", "<lista_argumenata>", "D_ZAGRADA"]
+    ],
+    "<lista_argumenata>": [
+        ["<izraz_pridruzivanja>"],
+        ["<lista_argumenata>", "ZAREZ", "<izraz_pridruzivanja>"]
+    ],
+    "<unarni_izraz>": [
+        ["<postfiks_izraz>"],
+        ["OP_PLUS", "<unarni_izraz>"],
+        ["OP_MINUS", "<unarni_izraz>"],
+        ["OP_NEG", "<unarni_izraz>"],   
+        ["<cast_izraz>"]                
+    ],
+    "<cast_izraz>": [
+        ["<unarni_izraz>"],
+        ["L_ZAGRADA", "<ime_tipa>", "D_ZAGRADA", "<cast_izraz>"]
+    ],
+    "<multiplikativni_izraz>": [
+        ["<cast_izraz>"],
+        ["<multiplikativni_izraz>", "OP_PUTA", "<cast_izraz>"],
+        ["<multiplikativni_izraz>", "OP_DIJELI", "<cast_izraz>"],
+        ["<multiplikativni_izraz>", "OP_MOD", "<cast_izraz>"]
+    ],
+    "<aditivni_izraz>": [
+        ["<multiplikativni_izraz>"],
+        ["<aditivni_izraz>", "OP_PLUS", "<multiplikativni_izraz>"],
+        ["<aditivni_izraz>", "OP_MINUS", "<multiplikativni_izraz>"]
+    ],
+    "<odnosni_izraz>": [
+        ["<aditivni_izraz>"],
+        ["<odnosni_izraz>", "OP_LT", "<aditivni_izraz>"],
+        ["<odnosni_izraz>", "OP_GT", "<aditivni_izraz>"],
+        ["<odnosni_izraz>", "OP_LE", "<aditivni_izraz>"],
+        ["<odnosni_izraz>", "OP_GE", "<aditivni_izraz>"]
+    ],
+    "<jednakosni_izraz>": [
+        ["<odnosni_izraz>"],
+        ["<jednakosni_izraz>", "OP_EQ", "<odnosni_izraz>"],
+        ["<jednakosni_izraz>", "OP_NEQ", "<odnosni_izraz>"]
+    ],
+    "<bin_i_izraz>": [
+        ["<jednakosni_izraz>"],
+        ["<bin_i_izraz>", "OP_BIN_I", "<jednakosni_izraz>"]
+    ],
+    "<bin_xili_izraz>": [
+        ["<bin_i_izraz>"],
+        ["<bin_xili_izraz>", "OP_BIN_XILI", "<bin_i_izraz>"]
+    ],
+    "<bin_ili_izraz>": [
+        ["<bin_xili_izraz>"],
+        ["<bin_ili_izraz>", "OP_BIN_ILI", "<bin_xili_izraz>"]
+    ],
+    "<log_i_izraz>": [
+        ["<bin_ili_izraz>"],
+        ["<log_i_izraz>", "OP_AND", "<bin_ili_izraz>"]
+    ],
+    "<log_ili_izraz>": [
+        ["<log_i_izraz>"],
+        ["<log_ili_izraz>", "OP_OR", "<log_i_izraz>"]
+    ],
+    "<izraz_pridruzivanja>": [
+        ["<log_ili_izraz>"],
+        ["<izraz_pridruzivanja>", "OP_PRIDRUZI", "<izraz_pridruzivanja>"]
+    ],
+    "<izraz>": [
+        ["<izraz_pridruzivanja>"],
+        ["<izraz>", "ZAREZ", "<izraz_pridruzivanja>"]
+    ],
     "<prijevodna_jedinica>": [
-        ["<vanjska_deklaracija>"]
+        ["<vanjska_deklaracija>"],
+        ["<prijevodna_jedinica>", "<vanjska_deklaracija>"]
     ],
     "<vanjska_deklaracija>": [
-        ["<definicija_funkcije>"]
+        ["<definicija_funkcije>"],
+        ["<deklaracija>"]
     ],
     "<definicija_funkcije>": [
-        ["<ime_tipa>", "IDN", "L_ZAGRADA", "KR_VOID", "D_ZAGRADA", "<slozena_naredba>"]
+        ["<ime_tipa>", "IDN", "L_ZAGRADA", "KR_VOID", "D_ZAGRADA", "<slozena_naredba>"],
+        ["<ime_tipa>", "IDN", "L_ZAGRADA", "<lista_parametara>", "D_ZAGRADA", "<slozena_naredba>"]
+    ],
+    "<slozena_naredba>": [
+        ["L_VIT_ZAGRADA", "<lista_deklaracija>", "<lista_naredbi>", "D_VIT_ZAGRADA"],
+        ["L_VIT_ZAGRADA", "<lista_deklaracija>", "D_VIT_ZAGRADA"],
+        ["L_VIT_ZAGRADA", "<lista_naredbi>", "D_VIT_ZAGRADA"],
+        ["L_VIT_ZAGRADA", "D_VIT_ZAGRADA"]
+    ],
+    "<lista_naredbi>": [
+        ["<naredba>"],
+        ["<lista_naredbi>", "<naredba>"]
+    ],
+    "<naredba>": [
+        ["<izraz_naredba>"],
+        ["<slozena_naredba>"],
+        ["<naredba_izraza>"], 
+        ["<naredba_grananja>"],
+        ["<naredba_petlje>"],
+        ["<naredba_skoka>"]
+    ],
+    "<izraz_naredba>": [
+        ["TOCKAZAREZ"],
+        ["<izraz>", "TOCKAZAREZ"]
+    ],
+    "<naredba_grananja>": [
+        ["KR_IF", "L_ZAGRADA", "<izraz>", "D_ZAGRADA", "<naredba>"],
+        ["KR_IF", "L_ZAGRADA", "<izraz>", "D_ZAGRADA", "<naredba>", "KR_ELSE", "<naredba>"]
+    ],
+    "<naredba_petlje>": [
+        ["KR_WHILE", "L_ZAGRADA", "<izraz>", "D_ZAGRADA", "<naredba>"],
+        ["KR_FOR", "L_ZAGRADA", "<izraz_naredba>", "<izraz_naredba>", "D_ZAGRADA", "<naredba>"],
+        ["KR_FOR", "L_ZAGRADA", "<izraz_naredba>", "<izraz_naredba>", "<izraz>", "D_ZAGRADA", "<naredba>"]
+    ],
+    "<naredba_skoka>": [
+        ["KR_RETURN", "<izraz>", "TOCKAZAREZ"],
+        ["KR_RETURN", "TOCKAZAREZ"]
+    ],
+    "<lista_deklaracija>": [
+        [],  
+        ["<deklaracija>"],
+        ["<lista_deklaracija>", "<deklaracija>"]
+    ],
+    "<deklaracija>": [
+        ["<ime_tipa>", "<lista_init_deklaratora>", "TOCKAZAREZ"]
+    ],
+    "<lista_init_deklaratora>": [
+        ["<init_deklarator>"],
+        ["<lista_init_deklaratora>", "ZAREZ", "<init_deklarator>"]
+    ],
+    "<init_deklarator>": [
+        ["<izravni_deklarator>"],
+        ["<izravni_deklarator>", "OP_PRIDRUZI", "<inicijalizator>"]
+    ],
+    "<izravni_deklarator>": [
+        ["IDN"],
+        ["IDN", "L_UGL_ZAGRADA", "BROJ", "D_UGL_ZAGRADA"],
+        ["IDN", "L_ZAGRADA", "KR_VOID", "D_ZAGRADA"],
+        ["IDN", "L_ZAGRADA", "<lista_parametara>", "D_ZAGRADA"]
     ],
     "<ime_tipa>": [
         ["<specifikator_tipa>"]
@@ -136,37 +277,33 @@ GRAMMAR = {
     "<specifikator_tipa>": [
         ["KR_INT"],
         ["KR_CHAR"],
-        ["KR_VOID"]
+        ["KR_VOID"],
+        ["KR_CONST", "KR_CHAR"], 
+        ["KR_CONST", "KR_INT"]   
     ],
-    "<slozena_naredba>": [
-        ["L_VIT_ZAGRADA", "<lista_naredbi>", "D_VIT_ZAGRADA"]
+    "<lista_parametara>": [
+        ["<deklaracija_parametra>"],
+        ["<lista_parametara>", "ZAREZ", "<deklaracija_parametra>"]
     ],
-    "<lista_naredbi>": [
-        ["<naredba>"]
+    "<deklaracija_parametra>": [
+        ["<ime_tipa>", "IDN"],
+        ["<ime_tipa>", "IDN", "L_UGL_ZAGRADA", "D_UGL_ZAGRADA"]
     ],
-    "<naredba>": [
-        ["<naredba_skoka>"]
+    "<inicijalizator>": [
+        ["<izraz_pridruzivanja>"],
+        ["L_VIT_ZAGRADA", "<lista_inicijala>", "D_VIT_ZAGRADA"]
     ],
-    "<naredba_skoka>": [
-        ["KR_RETURN", "<izraz>", "TOCKAZAREZ"]
+    "<lista_inicijala>": [
+        ["<inicijalizator>"],
+        ["<lista_inicijala>", "ZAREZ", "<inicijalizator>"]
     ],
-
-    # lanac izraza
-    "<izraz>": [["<izraz_pridruzivanja>"]],
-    "<izraz_pridruzivanja>": [["<log_ili_izraz>"]],
-    "<log_ili_izraz>": [["<log_i_izraz>"]],
-    "<log_i_izraz>": [["<bin_ili_izraz>"]],
-    "<bin_ili_izraz>": [["<bin_xili_izraz>"]],
-    "<bin_xili_izraz>": [["<bin_i_izraz>"]],
-    "<bin_i_izraz>": [["<jednakosni_izraz>"]],
-    "<jednakosni_izraz>": [["<odnosni_izraz>"]],
-    "<odnosni_izraz>": [["<aditivni_izraz>"]],
-    "<aditivni_izraz>": [["<multiplikativni_izraz>"]],
-    "<multiplikativni_izraz>": [["<cast_izraz>"]],
-    "<cast_izraz>": [["<unarni_izraz>"]],
-    "<unarni_izraz>": [["<postfiks_izraz>"]],
-    "<postfiks_izraz>": [["<primarni_izraz>"]],
-    "<primarni_izraz>": [["IDN"]],
+    "<lista_deklaracija_blok>": [
+        ["<lista_deklaracija>"]
+    ],
+    "<lista_naredbi_opt>": [
+        [],
+        ["<lista_naredbi>"]
+    ]
 }
 
 
@@ -218,6 +355,22 @@ def validate_tree(root):
         print("STRUKTURNI PROBLEM:")
         print(e)
 
+# ===============================
+# ANALIZA PRAVILA
+# ===============================
+
+def analyze(node):
+    # samo DEMO pravilo za <primarni_izraz> ::= IDN(...)
+    if node.name == "<primarni_izraz>":
+        if len(node.children) == 1:
+            child = node.children[0]
+            if not child.is_nonterminal and child.token == "IDN":
+                print(f"<primarni_izraz> ::= IDN({child.line},{child.lexeme})")
+                return
+
+    # rekurzija
+    for c in node.children:
+        analyze(c)
 
 
 # ===============================
@@ -232,7 +385,8 @@ def main():
     root = parse_indented(data)
     #print_tree(root)
 
-    validate_tree(root)
+    #validate_tree(root)
+    analyze(root)
 
 if __name__ == "__main__":
     main()
