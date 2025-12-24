@@ -241,9 +241,9 @@ def semanticka_greska(node):
     sys.exit(0)
 
 
-globalne_funkcije = {}  # only GLOBAL signature per name (consistency)
-deklarirane_funkcije = set()  # set of (name, tfun) declared ANYWHERE
-definirane_funkcije = set()  # set of (name, tfun) defined (always global
+globalne_funkcije = {}
+deklarirane_funkcije = set()
+definirane_funkcije = set()
 stog_povratnih_tipova = []  # stog povratnih tipova trenutne funkcije
 dubina_petlje = 0
 
@@ -289,7 +289,6 @@ def analyze(node, djelokrug):
             return False
 
     # pomocna funkcija za odredivanje duljine niza znakova
-
     def duljina_niza_znakova(lex):
         if lex is None:
             return 0
@@ -466,7 +465,6 @@ def analyze(node, djelokrug):
             return
 
         if je_produkcija(node, ["<unarni_operator>", "<cast_izraz>"]):
-            # sets node.children[0].op (or similar)
             analyze(node.children[0], djelokrug)
             analyze(node.children[1], djelokrug)
             t = node.children[1].tip
@@ -635,9 +633,13 @@ def analyze(node, djelokrug):
             return
         semanticka_greska(node)
 
-    # <slozena_naredba>, oznacava novi djelokrug
+    # <slozena_naredba>, oznacava novi djelokrug osim ako je tijelo funkcije
     if je_nezavrsni(node, "<slozena_naredba>"):
-        novi = Djelokrug(djelokrug)
+        if getattr(node, "je_tijelo_funkcije", False):
+            novi = djelokrug  # parametri i tijelo funkcije dijele isti djelokrug
+        else:
+            novi = Djelokrug(djelokrug)
+
         for c in node.children:
             analyze(c, novi)
         return
@@ -728,15 +730,12 @@ def analyze(node, djelokrug):
 
     # <naredba_skoka>
     if je_nezavrsni(node, "<naredba_skoka>"):
-
-        # (KR_CONTINUE | KR_BREAK) ;
         if je_produkcija(node, ["KR_CONTINUE", "TOCKAZAREZ"]) or \
                 je_produkcija(node, ["KR_BREAK", "TOCKAZAREZ"]):
             if dubina_petlje <= 0:
                 semanticka_greska(node)
             return
 
-        # return ;
         if je_produkcija(node, ["KR_RETURN", "TOCKAZAREZ"]):
             if not stog_povratnih_tipova:
                 semanticka_greska(node)
@@ -745,7 +744,6 @@ def analyze(node, djelokrug):
                 semanticka_greska(node)
             return
 
-        # return <izraz> ;
         if je_produkcija(node, ["KR_RETURN", "<izraz>", "TOCKAZAREZ"]):
             if not stog_povratnih_tipova:
                 semanticka_greska(node)
@@ -788,6 +786,9 @@ def analyze(node, djelokrug):
                 if ime in globalne_funkcije and globalne_funkcije[ime] != tfun:
                     semanticka_greska(node)
                 globalne_funkcije[ime] = tfun
+            key = (ime, tfun)
+            if key in definirane_funkcije:
+                semanticka_greska(node)
             definirane_funkcije.add((ime, tfun))
 
             # definiraj u trenutnom djelokrugu
@@ -795,6 +796,7 @@ def analyze(node, djelokrug):
 
             # novi djelokrug tijela funkcije
             stog_povratnih_tipova.append(ret)
+            node.children[5].je_tijelo_funkcije = True
             analyze(node.children[5], Djelokrug(djelokrug))
             stog_povratnih_tipova.pop()
             return
@@ -802,6 +804,8 @@ def analyze(node, djelokrug):
         if je_produkcija(node, ["<ime_tipa>", "IDN", "L_ZAGRADA", "<lista_parametara>", "D_ZAGRADA", "<slozena_naredba>"]):
             analyze(node.children[0], djelokrug)
             ret = node.children[0].tip
+            if is_const(ret):
+                semanticka_greska(node)
             ime = node.children[1].leksicka_jedinka
 
             analyze(node.children[3], djelokrug)
@@ -814,6 +818,9 @@ def analyze(node, djelokrug):
                 if ime in globalne_funkcije and globalne_funkcije[ime] != tfun:
                     semanticka_greska(node)
                 globalne_funkcije[ime] = tfun
+            key = (ime, tfun)
+            if key in definirane_funkcije:
+                semanticka_greska(node)
             definirane_funkcije.add((ime, tfun))
 
             djelokrug.deklarirano(Simbol(ime, tfun))
@@ -825,6 +832,7 @@ def analyze(node, djelokrug):
                     semanticka_greska(node)
 
             stog_povratnih_tipova.append(ret)
+            node.children[5].je_tijelo_funkcije = True
             analyze(node.children[5], fscope)
             stog_povratnih_tipova.pop()
             return
@@ -841,7 +849,6 @@ def analyze(node, djelokrug):
         if je_produkcija(node, ["<lista_parametara>", "ZAREZ", "<deklaracija_parametra>"]):
             analyze(node.children[0], djelokrug)
             analyze(node.children[2], djelokrug)
-            # no duplicate param names
             if node.children[2].ime in node.children[0].imena:
                 semanticka_greska(node)
             node.tipovi = node.children[0].tipovi + [node.children[2].tip]
@@ -939,7 +946,12 @@ def analyze(node, djelokrug):
             else:
                 # inicijalizacija polja
                 elem = tdecl[1]
-                tipovi = node.children[2].tipovi
+
+                tipovi = getattr(node.children[2], "tipovi", None)
+                if tipovi is None:
+                    # inicijalizator nije { ... } niti "string" poseban slucaj
+                    semanticka_greska(node)
+
                 if len(tipovi) > getattr(node.children[0], "br_elem", 10**9):
                     semanticka_greska(node)
                 for tt in tipovi:
@@ -990,7 +1002,6 @@ def analyze(node, djelokrug):
         if je_produkcija(node, ["IDN", "L_ZAGRADA", "KR_VOID", "D_ZAGRADA"]):
             ime = node.children[0].leksicka_jedinka
             if inh == T_VOID:
-                # functions may return void, that's ok; but inh is return type here
                 pass
             tfun = T_FUNKCIJA([], inh)
 
