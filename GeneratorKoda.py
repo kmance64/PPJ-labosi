@@ -452,6 +452,33 @@ def analyze(node, djelokrug):
                 semanticka_greska(node)
             node.tip = T_INT
             node.l_izraz = 0
+
+            # arm kod za postfiksni ++ i --
+            if trenutna_funkcija is not None:
+                arm_kod.append("    POP {R6}")   # stara vrijednost
+                arm_kod.append("    MOV R7, R6") # kopija za rezultat izraza
+
+                if node.children[1].zavrsni == "OP_INC":
+                    arm_kod.append("    ADD R6, R6, #1")
+                else:
+                    arm_kod.append("    SUB R6, R6, #1")
+
+                child = node.children[0]
+                if je_nezavrsni(child, "<postfiks_izraz>") and \
+                je_produkcija(child, ["<primarni_izraz>"]) and \
+                je_produkcija(child.children[0], ["IDN"]):
+
+                    ime = child.children[0].children[0].leksicka_jedinka
+                    sym = djelokrug.u_nekom_djelokrugu(ime)
+
+                    if getattr(sym, "is_global", False):
+                        arm_kod.append(f"    LDR R5, ={ime}")
+                        arm_kod.append("    STR R6, [R5]")
+                    else:
+                        arm_kod.append(f"    STR R6, [R4, #{sym.offset}]")
+
+                arm_kod.append("    PUSH {R7}")
+
             return
 
         semanticka_greska(node)
@@ -489,16 +516,66 @@ def analyze(node, djelokrug):
                 semanticka_greska(node)
             node.tip = T_INT
             node.l_izraz = 0
+
+            # arm kod za prefiksni ++ i --
+            if trenutna_funkcija is not None:
+                arm_kod.append("    POP {R6}")
+
+                if node.children[0].zavrsni == "OP_INC":
+                    arm_kod.append("    ADD R6, R6, #1")
+                else:
+                    arm_kod.append("    SUB R6, R6, #1")
+
+                child = node.children[1]
+                if je_nezavrsni(child, "<unarni_izraz>") and \
+                je_produkcija(child, ["<postfiks_izraz>"]) and \
+                je_produkcija(child.children[0], ["<primarni_izraz>"]) and \
+                je_produkcija(child.children[0].children[0], ["IDN"]):
+
+                    ime = child.children[0].children[0].children[0].leksicka_jedinka
+                    sym = djelokrug.u_nekom_djelokrugu(ime)
+
+                    if getattr(sym, "is_global", False):
+                        arm_kod.append(f"    LDR R5, ={ime}")
+                        arm_kod.append("    STR R6, [R5]")
+                    else:
+                        arm_kod.append(f"    STR R6, [R4, #{sym.offset}]")
+
+                arm_kod.append("    PUSH {R6}")
+
             return
 
         if je_produkcija(node, ["<unarni_operator>", "<cast_izraz>"]):
-            analyze(node.children[0], djelokrug)
+            #analyze(node.children[0], djelokrug)
             analyze(node.children[1], djelokrug)
             t = node.children[1].tip
             if not moze_implicitno_pretvoriti(t, T_INT):
                 semanticka_greska(node)
             node.tip = T_INT
             node.l_izraz = 0
+
+        # arm kod za unarne operatore
+        if trenutna_funkcija is not None:
+            op = node.children[0].children[0].zavrsni
+            arm_kod.append("    POP {R6}")
+
+            if op == "PLUS":
+                pass
+            elif op == "MINUS":
+                arm_kod.append("    RSBS R6, R6, #0")
+            elif op == "OP_NEG":
+                arm_kod.append("    CMP R6, #0")
+                lbl = len(arm_kod)
+                arm_kod.append(f"    BEQ NEG_TRUE_{lbl}")
+                arm_kod.append("    MOV R6, #0")
+                arm_kod.append(f"    B NEG_END_{lbl}")
+                arm_kod.append(f"NEG_TRUE_{lbl}:")
+                arm_kod.append("    MOV R6, #1")
+                arm_kod.append(f"NEG_END_{lbl}:")
+
+            arm_kod.append("    PUSH {R6}")
+
+
             return
 
         semanticka_greska(node)
@@ -660,6 +737,35 @@ def analyze(node, djelokrug):
         # izrazi s operatorima
         if len(node.children) == 3:
             bin_op(node, 0, 2, T_INT, True)
+
+            # ARM kod za relacijske i logičke operatore (uklj. ==)
+            if trenutna_funkcija is not None:
+                op = node.children[1].zavrsni
+
+                arm_kod.append("    POP {R0}")  # desni operand
+                arm_kod.append("    POP {R1}")  # lijevi operand
+                arm_kod.append("    CMP R1, R0")
+
+                lbl = len(arm_kod)
+
+                if op == "OP_EQ":
+                    arm_kod.append(f"    BEQ TRUE_{lbl}")
+                elif op == "OP_NEQ":
+                    arm_kod.append(f"    BNE TRUE_{lbl}")
+                else:
+                    # za sad ostali operatori samo padnu na 0/1 = 0
+                    arm_kod.append(f"    B FALSE_{lbl}")
+
+                arm_kod.append(f"FALSE_{lbl}:")
+                arm_kod.append("    MOV R6, #0")
+                arm_kod.append(f"    B END_{lbl}")
+
+                arm_kod.append(f"TRUE_{lbl}:")
+                arm_kod.append("    MOV R6, #1")
+
+                arm_kod.append(f"END_{lbl}:")
+                arm_kod.append("    PUSH {R6}")
+
             return
 
         semanticka_greska(node)
