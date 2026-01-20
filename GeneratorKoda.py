@@ -572,6 +572,8 @@ def analyze(node, djelokrug):
                 arm_kod.append(f"NEG_TRUE_{lbl}:")
                 arm_kod.append("    MOV R6, #1")
                 arm_kod.append(f"NEG_END_{lbl}:")
+            elif op == "OP_TILDA":
+                arm_kod.append("    MVN R6, R6")
 
             arm_kod.append("    PUSH {R6}")
 
@@ -721,6 +723,67 @@ def analyze(node, djelokrug):
         "<log_ili_izraz>",
     ]
     if node.nezavrsni in rel_ops:
+        if node.nezavrsni == "<log_i_izraz>" and \
+            len(node.children) == 3 and \
+            node.children[1].zavrsni == "OP_I":
+
+            analyze(node.children[0], djelokrug)
+            if trenutna_funkcija is not None:
+                lbl = len(arm_kod)
+                arm_kod.append("    POP {R6}")
+                arm_kod.append("    CMP R6, #0")
+                arm_kod.append(f"    BEQ LOGI_FALSE_{lbl}")
+
+            analyze(node.children[2], djelokrug)
+            if trenutna_funkcija is not None:
+                arm_kod.append("    POP {R6}")
+                arm_kod.append("    CMP R6, #0")
+                arm_kod.append(f"    BEQ LOGI_FALSE_{lbl}")
+
+                arm_kod.append("    MOV R6, #1")
+                arm_kod.append(f"    B LOGI_END_{lbl}")
+
+                arm_kod.append(f"LOGI_FALSE_{lbl}:")
+                arm_kod.append("    MOV R6, #0")
+
+                arm_kod.append(f"LOGI_END_{lbl}:")
+                arm_kod.append("    PUSH {R6}")
+
+            node.tip = T_INT
+            node.l_izraz = 0
+            return
+                # === LOGIČKI ILI (||) – short-circuit ===
+        if node.nezavrsni == "<log_ili_izraz>" and \
+            len(node.children) == 3 and \
+            node.children[1].zavrsni == "OP_ILI":
+
+            analyze(node.children[0], djelokrug)
+            if trenutna_funkcija is not None:
+                lbl = len(arm_kod)
+                arm_kod.append("    POP {R6}")
+                arm_kod.append("    CMP R6, #0")
+                arm_kod.append(f"    BNE LOGILI_TRUE_{lbl}")
+
+            analyze(node.children[2], djelokrug)
+            if trenutna_funkcija is not None:
+                arm_kod.append("    POP {R6}")
+                arm_kod.append("    CMP R6, #0")
+                arm_kod.append(f"    BNE LOGILI_TRUE_{lbl}")
+
+                arm_kod.append("    MOV R6, #0")
+                arm_kod.append(f"    B LOGILI_END_{lbl}")
+
+                arm_kod.append(f"LOGILI_TRUE_{lbl}:")
+                arm_kod.append("    MOV R6, #1")
+
+                arm_kod.append(f"LOGILI_END_{lbl}:")
+                arm_kod.append("    PUSH {R6}")
+
+            node.tip = T_INT
+            node.l_izraz = 0
+            return
+
+        
         # slucajevi kad produkcija samo ide u sljedeci nezavrsni znak
         if je_produkcija(node, ["<aditivni_izraz>"]) or \
            je_produkcija(node, ["<odnosni_izraz>"]) or \
@@ -736,14 +799,34 @@ def analyze(node, djelokrug):
 
         # izrazi s operatorima
         if len(node.children) == 3:
+            op = node.children[1].zavrsni
+            if op == "OP_I" or op == "OP_ILI":
+                semanticka_greska(node)
             bin_op(node, 0, 2, T_INT, True)
 
-            # ARM kod za relacijske i logičke operatore (uklj. ==)
             if trenutna_funkcija is not None:
                 op = node.children[1].zavrsni
 
                 arm_kod.append("    POP {R0}")  # desni operand
                 arm_kod.append("    POP {R1}")  # lijevi operand
+
+                # === BITOVNI OPERATORI ===
+                if op == "OP_BIN_I":          # &
+                    arm_kod.append("    AND R6, R1, R0")
+                    arm_kod.append("    PUSH {R6}")
+                    return
+
+                if op == "OP_BIN_XILI":       # ^
+                    arm_kod.append("    EOR R6, R1, R0")
+                    arm_kod.append("    PUSH {R6}")
+                    return
+
+                if op == "OP_BIN_ILI":        # |
+                    arm_kod.append("    ORR R6, R1, R0")
+                    arm_kod.append("    PUSH {R6}")
+                    return
+
+                # === RELACIJSKI I LOGIČKI ===
                 arm_kod.append("    CMP R1, R0")
 
                 lbl = len(arm_kod)
@@ -752,8 +835,15 @@ def analyze(node, djelokrug):
                     arm_kod.append(f"    BEQ TRUE_{lbl}")
                 elif op == "OP_NEQ":
                     arm_kod.append(f"    BNE TRUE_{lbl}")
+                elif op == "OP_GT":
+                    arm_kod.append(f"    BGT TRUE_{lbl}")
+                elif op == "OP_LT":
+                    arm_kod.append(f"    BLT TRUE_{lbl}")
+                elif op == "OP_GTE":
+                    arm_kod.append(f"    BGE TRUE_{lbl}")
+                elif op == "OP_LTE":
+                    arm_kod.append(f"    BLE TRUE_{lbl}")
                 else:
-                    # za sad ostali operatori samo padnu na 0/1 = 0
                     arm_kod.append(f"    B FALSE_{lbl}")
 
                 arm_kod.append(f"FALSE_{lbl}:")
@@ -786,6 +876,20 @@ def analyze(node, djelokrug):
             analyze(node.children[2], djelokrug)
             if not moze_implicitno_pretvoriti(node.children[2].tip, node.children[0].tip):
                 semanticka_greska(node)
+
+            if trenutna_funkcija is not None:
+                arm_kod.append("    POP {R6}")
+
+                ime = node.children[0].children[0].children[0].leksicka_jedinka
+                sym = djelokrug.u_nekom_djelokrugu(ime)
+
+                if getattr(sym, "is_global", False):
+                    arm_kod.append(f"    LDR R5, ={ime}")
+                    arm_kod.append("    STR R6, [R5]")
+                else:
+                    arm_kod.append(f"    STR R6, [R4, #{sym.offset}]")
+
+                arm_kod.append("    PUSH {R6}")
 
             node.tip = node.children[0].tip
             node.l_izraz = 0
