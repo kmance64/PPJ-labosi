@@ -74,6 +74,7 @@ class Simbol:
         self.tip = tip
         self.is_global = False  # globalne varijable u arm kodu se pisu na dnu
         self.offset = None  # velicina u bajtovima, potrebno za arm kod (stog)
+        self.is_param = False  # je li parametar funkcije
 
 
 class Djelokrug:
@@ -194,9 +195,24 @@ INT_MIN = -2147483648
 INT_MAX = 2147483647
 
 
-def parse_broj(lex):
-    # prihvaca npr. hex i bin brojeve
-    return int(lex, 0)
+def parse_const_exp(node):
+    # vraca int vrijednost za BROJ ili ZNAK, inace None
+    if node is None or node.zavrsni is None:
+        return None
+    if node.zavrsni == "BROJ":
+        return int(node.leksicka_jedinka, 0)
+    if node.zavrsni == "ZNAK":
+        if not je_valid_char(node.leksicka_jedinka):
+            return None
+        body = node.leksicka_jedinka[1:-1]
+        if body[0] != "\\":
+            return ord(body)
+        if len(body) != 2:
+            return None
+        esc = {"t": "\t", "n": "\n", "0": "\0", "'": "'", '"': '"', "\\": "\\"}
+        ch = esc.get(body[1])
+        return ord(ch) if ch is not None else None
+    return None
 
 
 def je_valid_char(lex):
@@ -248,17 +264,24 @@ deklarirane_funkcije = set()
 definirane_funkcije = set()
 stog_povratnih_tipova = []  # stog povratnih tipova trenutne funkcije
 dubina_petlje = 0
+loop_continue = []
+loop_break = []
 
 # uredivanje za generator arm koda!!!!
 arm_kod = []
 globalne_varijable = {}
+globalni_nizovi = {}
 trenutna_funkcija = None
 trenutna_velicina_okvira = 0  # koliko bajtova je zauzeto u trenutnoj funkciji
+nemoj_generirati = False
 
 
 def analyze(node, djelokrug):
     global dubina_petlje
+    global loop_continue
+    global loop_break
     global trenutna_funkcija
+    global nemoj_generirati
     global trenutna_velicina_okvira
     if node is None:
         return
@@ -330,8 +353,26 @@ def analyze(node, djelokrug):
             node.l_izraz = 1 if je_lizraz_tip(node.tip) else 0
 
             # arm kod za ucitavanje varijable i pohranu na stog
-            if trenutna_funkcija is not None:
+            if trenutna_funkcija is not None and not nemoj_generirati:
+                if is_fun(node.tip):
+                    return
                 # globalne varijable se ucitavaju iz .data na dnu arm koda
+                if is_niz(node.tip):
+                    # za niz vracamo adresu
+                    if getattr(sym, "is_global", False):
+                        arm_kod.append(f"    LDR R5, ={idn}")
+                        arm_kod.append("    MOV R6, R5")
+                    elif getattr(sym, "is_param", False):
+                        arm_kod.append(f"    LDR R6, [R4, #{sym.offset}]")
+                    else:
+                        if sym.offset is None:
+                            semanticka_greska(node)
+                        if sym.offset < 0:
+                            arm_kod.append(f"    SUB R6, R4, #{-sym.offset}")
+                        else:
+                            arm_kod.append(f"    ADD R6, R4, #{sym.offset}")
+                    arm_kod.append("    PUSH {R6}")
+                    return
                 if getattr(sym, "is_global", False):
                     arm_kod.append(f"    LDR R5, ={idn}")
                     arm_kod.append("    LDR R6, [R5]")
@@ -344,7 +385,7 @@ def analyze(node, djelokrug):
 
         if je_produkcija(node, ["BROJ"]):
             try:
-                v = parse_broj(node.children[0].leksicka_jedinka)
+                v = int(node.children[0].leksicka_jedinka, 0)
             except:
                 semanticka_greska(node)
             if v < INT_MIN or v > INT_MAX:
@@ -353,7 +394,7 @@ def analyze(node, djelokrug):
             node.l_izraz = 0
 
             # pohrana broja na stog
-            if trenutna_funkcija is not None:
+            if trenutna_funkcija is not None and not nemoj_generirati:
                 arm_kod.append(f"    MOV R6, #{v}")
                 arm_kod.append("    PUSH {R6}")
             return
@@ -363,6 +404,13 @@ def analyze(node, djelokrug):
                 semanticka_greska(node)
             node.tip = T_CHAR
             node.l_izraz = 0
+            # pohrana znaka na stog
+            if trenutna_funkcija is not None and not nemoj_generirati:
+                v = parse_const_exp(node.children[0])
+                if v is None:
+                    semanticka_greska(node)
+                arm_kod.append(f"    MOV R6, #{v}")
+                arm_kod.append("    PUSH {R6}")
             return
 
         if je_produkcija(node, ["NIZ_ZNAKOVA"]):
@@ -390,7 +438,10 @@ def analyze(node, djelokrug):
 
         # ideksiranje nizova, a[nesto]
         if je_produkcija(node, ["<postfiks_izraz>", "L_UGL_ZAGRADA", "<izraz>", "D_UGL_ZAGRADA"]):
+            prev_nemoj_generirati = nemoj_generirati
+            nemoj_generirati = True  # da se prepozna da je array
             analyze(node.children[0], djelokrug)
+            nemoj_generirati = prev_nemoj_generirati
             analyze(node.children[2], djelokrug)
 
             t0 = node.children[0].tip
@@ -404,11 +455,47 @@ def analyze(node, djelokrug):
             elem = t0[1]
             node.tip = elem
             node.l_izraz = 1 if je_lizraz_tip(elem) else 0
+
+            # arm kod: ucitaj vrijednost elementa niza
+            if trenutna_funkcija is not None and not nemoj_generirati:
+                # indeks je na stogu (iz analyze <izraz>)
+                arm_kod.append("    POP {R0}")
+                # pronadi ime arraya
+                base = node.children[0]
+                while base is not None and len(base.children) == 1 and base.nezavrsni != "<primarni_izraz>":
+                    base = base.children[0]
+                if base is None or base.nezavrsni != "<primarni_izraz>" or \
+                        not je_produkcija(base, ["IDN"]):
+                    semanticka_greska(node)
+                ime = base.children[0].leksicka_jedinka
+
+                # je li globalni ili lokalni array
+                sym = djelokrug.u_nekom_djelokrugu(ime)
+                if sym is None:
+                    semanticka_greska(node)
+                if getattr(sym, "is_global", False):
+                    arm_kod.append(f"    LDR R5, ={ime}")
+                else:
+                    if sym.offset is None:
+                        semanticka_greska(node)
+                    if getattr(sym, "is_param", False) and is_niz(sym.tip):
+                        arm_kod.append(f"    LDR R5, [R4, #{sym.offset}]")
+                    else:
+                        if sym.offset < 0:
+                            arm_kod.append(f"    SUB R5, R4, #{-sym.offset}")
+                        else:
+                            arm_kod.append(f"    ADD R5, R4, #{sym.offset}")
+                arm_kod.append("    ADD R5, R5, R0, LSL #2")
+                arm_kod.append("    LDR R6, [R5]")
+                arm_kod.append("    PUSH {R6}")
             return
 
         # pozivanje funkcija bez parametara, f()
         if je_produkcija(node, ["<postfiks_izraz>", "L_ZAGRADA", "D_ZAGRADA"]):
+            prev_nemoj_generirati = nemoj_generirati
+            nemoj_generirati = True
             analyze(node.children[0], djelokrug)
+            nemoj_generirati = prev_nemoj_generirati
             t0 = node.children[0].tip
             if not is_fun(t0):
                 semanticka_greska(node)
@@ -417,11 +504,24 @@ def analyze(node, djelokrug):
                 semanticka_greska(node)
             node.tip = t0[2]
             node.l_izraz = 0
+            if trenutna_funkcija is not None:
+                base = node.children[0]
+                while base is not None and len(base.children) == 1 and base.nezavrsni != "<primarni_izraz>":
+                    base = base.children[0]
+                if base is None or base.nezavrsni != "<primarni_izraz>" or \
+                        not je_produkcija(base, ["IDN"]):
+                    semanticka_greska(node)
+                fname = base.children[0].leksicka_jedinka
+                arm_kod.append(f"    BL F_{fname.upper()}")
+                arm_kod.append("    PUSH {R6}")
             return
 
         # pozivanje funkcije s parametrima, f(args)
         if je_produkcija(node, ["<postfiks_izraz>", "L_ZAGRADA", "<lista_argumenata>", "D_ZAGRADA"]):
+            prev_nemoj_generirati = nemoj_generirati
+            nemoj_generirati = True
             analyze(node.children[0], djelokrug)
+            nemoj_generirati = prev_nemoj_generirati
             analyze(node.children[2], djelokrug)
 
             t0 = node.children[0].tip
@@ -441,6 +541,22 @@ def analyze(node, djelokrug):
 
             node.tip = t0[2]
             node.l_izraz = 0
+            if trenutna_funkcija is not None:
+                # args su na stogu, pop u R0..R3 obrnutim redoslijedom
+                for i in range(len(arg_types) - 1, -1, -1):
+                    if i < 4:
+                        arm_kod.append(f"    POP {{R{i}}}")
+                    else:
+                        arm_kod.append("    POP {R6}")
+                base = node.children[0]
+                while base is not None and len(base.children) == 1 and base.nezavrsni != "<primarni_izraz>":
+                    base = base.children[0]
+                if base is None or base.nezavrsni != "<primarni_izraz>" or \
+                        not je_produkcija(base, ["IDN"]):
+                    semanticka_greska(node)
+                fname = base.children[0].leksicka_jedinka
+                arm_kod.append(f"    BL F_{fname.upper()}")
+                arm_kod.append("    PUSH {R6}")
             return
 
         if je_produkcija(node, ["<postfiks_izraz>", "OP_INC"]) or \
@@ -456,7 +572,7 @@ def analyze(node, djelokrug):
             # arm kod za postfiksni ++ i --
             if trenutna_funkcija is not None:
                 arm_kod.append("    POP {R6}")   # stara vrijednost
-                arm_kod.append("    MOV R7, R6") # kopija za rezultat izraza
+                arm_kod.append("    MOV R7, R6")  # kopija za rezultat izraza
 
                 if node.children[1].zavrsni == "OP_INC":
                     arm_kod.append("    ADD R6, R6, #1")
@@ -465,8 +581,8 @@ def analyze(node, djelokrug):
 
                 child = node.children[0]
                 if je_nezavrsni(child, "<postfiks_izraz>") and \
-                je_produkcija(child, ["<primarni_izraz>"]) and \
-                je_produkcija(child.children[0], ["IDN"]):
+                        je_produkcija(child, ["<primarni_izraz>"]) and \
+                        je_produkcija(child.children[0], ["IDN"]):
 
                     ime = child.children[0].children[0].leksicka_jedinka
                     sym = djelokrug.u_nekom_djelokrugu(ime)
@@ -528,9 +644,9 @@ def analyze(node, djelokrug):
 
                 child = node.children[1]
                 if je_nezavrsni(child, "<unarni_izraz>") and \
-                je_produkcija(child, ["<postfiks_izraz>"]) and \
-                je_produkcija(child.children[0], ["<primarni_izraz>"]) and \
-                je_produkcija(child.children[0].children[0], ["IDN"]):
+                        je_produkcija(child, ["<postfiks_izraz>"]) and \
+                        je_produkcija(child.children[0], ["<primarni_izraz>"]) and \
+                        je_produkcija(child.children[0].children[0], ["IDN"]):
 
                     ime = child.children[0].children[0].children[0].leksicka_jedinka
                     sym = djelokrug.u_nekom_djelokrugu(ime)
@@ -546,37 +662,35 @@ def analyze(node, djelokrug):
             return
 
         if je_produkcija(node, ["<unarni_operator>", "<cast_izraz>"]):
-            #analyze(node.children[0], djelokrug)
+            # analyze(node.children[0], djelokrug)
             analyze(node.children[1], djelokrug)
             t = node.children[1].tip
             if not moze_implicitno_pretvoriti(t, T_INT):
                 semanticka_greska(node)
             node.tip = T_INT
             node.l_izraz = 0
+            # arm kod za unarne operatore
+            if trenutna_funkcija is not None:
+                op = node.children[0].children[0].zavrsni
+                arm_kod.append("    POP {R6}")
 
-        # arm kod za unarne operatore
-        if trenutna_funkcija is not None:
-            op = node.children[0].children[0].zavrsni
-            arm_kod.append("    POP {R6}")
+                if op == "PLUS":
+                    pass
+                elif op == "MINUS":
+                    arm_kod.append("    RSBS R6, R6, #0")
+                elif op == "OP_NEG":
+                    arm_kod.append("    CMP R6, #0")
+                    lbl = len(arm_kod)
+                    arm_kod.append(f"    BEQ NEG_TRUE_{lbl}")
+                    arm_kod.append("    MOV R6, #0")
+                    arm_kod.append(f"    B NEG_END_{lbl}")
+                    arm_kod.append(f"NEG_TRUE_{lbl}:")
+                    arm_kod.append("    MOV R6, #1")
+                    arm_kod.append(f"NEG_END_{lbl}:")
+                elif op == "OP_TILDA":
+                    arm_kod.append("    MVN R6, R6")
 
-            if op == "PLUS":
-                pass
-            elif op == "MINUS":
-                arm_kod.append("    RSBS R6, R6, #0")
-            elif op == "OP_NEG":
-                arm_kod.append("    CMP R6, #0")
-                lbl = len(arm_kod)
-                arm_kod.append(f"    BEQ NEG_TRUE_{lbl}")
-                arm_kod.append("    MOV R6, #0")
-                arm_kod.append(f"    B NEG_END_{lbl}")
-                arm_kod.append(f"NEG_TRUE_{lbl}:")
-                arm_kod.append("    MOV R6, #1")
-                arm_kod.append(f"NEG_END_{lbl}:")
-            elif op == "OP_TILDA":
-                arm_kod.append("    MVN R6, R6")
-
-            arm_kod.append("    PUSH {R6}")
-
+                arm_kod.append("    PUSH {R6}")
 
             return
 
@@ -724,8 +838,8 @@ def analyze(node, djelokrug):
     ]
     if node.nezavrsni in rel_ops:
         if node.nezavrsni == "<log_i_izraz>" and \
-            len(node.children) == 3 and \
-            node.children[1].zavrsni == "OP_I":
+                len(node.children) == 3 and \
+                node.children[1].zavrsni == "OP_I":
 
             analyze(node.children[0], djelokrug)
             if trenutna_funkcija is not None:
@@ -752,10 +866,10 @@ def analyze(node, djelokrug):
             node.tip = T_INT
             node.l_izraz = 0
             return
-                # === LOGIČKI ILI (||) – short-circuit ===
+            # logicki ili (||)
         if node.nezavrsni == "<log_ili_izraz>" and \
-            len(node.children) == 3 and \
-            node.children[1].zavrsni == "OP_ILI":
+                len(node.children) == 3 and \
+                node.children[1].zavrsni == "OP_ILI":
 
             analyze(node.children[0], djelokrug)
             if trenutna_funkcija is not None:
@@ -783,7 +897,6 @@ def analyze(node, djelokrug):
             node.l_izraz = 0
             return
 
-        
         # slucajevi kad produkcija samo ide u sljedeci nezavrsni znak
         if je_produkcija(node, ["<aditivni_izraz>"]) or \
            je_produkcija(node, ["<odnosni_izraz>"]) or \
@@ -810,23 +923,23 @@ def analyze(node, djelokrug):
                 arm_kod.append("    POP {R0}")  # desni operand
                 arm_kod.append("    POP {R1}")  # lijevi operand
 
-                # === BITOVNI OPERATORI ===
-                if op == "OP_BIN_I":          # &
+                # bitovni operatori
+                if op == "OP_BIN_I":  # &
                     arm_kod.append("    AND R6, R1, R0")
                     arm_kod.append("    PUSH {R6}")
                     return
 
-                if op == "OP_BIN_XILI":       # ^
+                if op == "OP_BIN_XILI":  # ^
                     arm_kod.append("    EOR R6, R1, R0")
                     arm_kod.append("    PUSH {R6}")
                     return
 
-                if op == "OP_BIN_ILI":        # |
+                if op == "OP_BIN_ILI":  # |
                     arm_kod.append("    ORR R6, R1, R0")
                     arm_kod.append("    PUSH {R6}")
                     return
 
-                # === RELACIJSKI I LOGIČKI ===
+                # relacijski i logicki operatori
                 arm_kod.append("    CMP R1, R0")
 
                 lbl = len(arm_kod)
@@ -869,8 +982,20 @@ def analyze(node, djelokrug):
             return
 
         if je_produkcija(node, ["<postfiks_izraz>", "OP_PRIDRUZI", "<izraz_pridruzivanja>"]):
+            nemoj_generirati = True
             analyze(node.children[0], djelokrug)
-            if node.children[0].l_izraz != 1:
+            nemoj_generirati = False
+            lijevo = node.children[0]
+            is_lval = False
+            if je_nezavrsni(lijevo, "<postfiks_izraz>"):
+                if je_produkcija(lijevo, ["<primarni_izraz>"]) and \
+                        je_produkcija(lijevo.children[0], ["IDN"]):
+                    is_lval = True
+                if je_produkcija(lijevo, ["<postfiks_izraz>", "L_UGL_ZAGRADA", "<izraz>", "D_UGL_ZAGRADA"]):
+                    is_lval = True
+            if lijevo.l_izraz == 1:
+                is_lval = True
+            if not is_lval:
                 semanticka_greska(node)
 
             analyze(node.children[2], djelokrug)
@@ -880,14 +1005,49 @@ def analyze(node, djelokrug):
             if trenutna_funkcija is not None:
                 arm_kod.append("    POP {R6}")
 
-                ime = node.children[0].children[0].children[0].leksicka_jedinka
-                sym = djelokrug.u_nekom_djelokrugu(ime)
-
-                if getattr(sym, "is_global", False):
-                    arm_kod.append(f"    LDR R5, ={ime}")
+                # lijeva strana moze biti IDN ili element niza
+                lijevo = node.children[0]
+                if je_nezavrsni(lijevo, "<postfiks_izraz>") and \
+                        je_produkcija(lijevo, ["<primarni_izraz>"]):
+                    ime = lijevo.children[0].children[0].leksicka_jedinka
+                    sym = djelokrug.u_nekom_djelokrugu(ime)
+                    if getattr(sym, "is_global", False):
+                        arm_kod.append(f"    LDR R5, ={ime}")
+                        arm_kod.append("    STR R6, [R5]")
+                    else:
+                        arm_kod.append(f"    STR R6, [R4, #{sym.offset}]")
+                elif je_nezavrsni(lijevo, "<postfiks_izraz>") and \
+                        je_produkcija(lijevo, ["<postfiks_izraz>", "L_UGL_ZAGRADA", "<izraz>", "D_UGL_ZAGRADA"]):
+                    # izracunaj adresu elementa niza
+                    # sacuvaj desnu stranu jer izracun indeksa koristi R6
+                    arm_kod.append("    PUSH {R6}")
+                    analyze(lijevo.children[2], djelokrug)
+                    arm_kod.append("    POP {R0}")
+                    arm_kod.append("    POP {R6}")
+                    base = lijevo.children[0]
+                    while base is not None and len(base.children) == 1 and base.nezavrsni != "<primarni_izraz>":
+                        base = base.children[0]
+                    if base is None or base.nezavrsni != "<primarni_izraz>" or \
+                            not je_produkcija(base, ["IDN"]):
+                        semanticka_greska(node)
+                    ime = base.children[0].leksicka_jedinka
+                    sym = djelokrug.u_nekom_djelokrugu(ime)
+                    if getattr(sym, "is_global", False):
+                        arm_kod.append(f"    LDR R5, ={ime}")
+                    else:
+                        if getattr(sym, "is_param", False) and is_niz(sym.tip):
+                            arm_kod.append(f"    LDR R5, [R4, #{sym.offset}]")
+                        else:
+                            if sym.offset < 0:
+                                arm_kod.append(
+                                    f"    SUB R5, R4, #{-sym.offset}")
+                            else:
+                                arm_kod.append(
+                                    f"    ADD R5, R4, #{sym.offset}")
+                    arm_kod.append("    ADD R5, R5, R0, LSL #2")
                     arm_kod.append("    STR R6, [R5]")
                 else:
-                    arm_kod.append(f"    STR R6, [R4, #{sym.offset}]")
+                    semanticka_greska(node)
 
                 arm_kod.append("    PUSH {R6}")
 
@@ -952,56 +1112,152 @@ def analyze(node, djelokrug):
             analyze(node.children[2], djelokrug)
             if not moze_implicitno_pretvoriti(node.children[2].tip, T_INT):
                 semanticka_greska(node)
+            if trenutna_funkcija is not None:
+                lbl = len(arm_kod)
+                arm_kod.append("    POP {R6}")
+                arm_kod.append("    CMP R6, #0")
+                arm_kod.append(f"    BEQ END_IF_{lbl}")
             analyze(node.children[4], djelokrug)
+            if trenutna_funkcija is not None:
+                arm_kod.append(f"END_IF_{lbl}:")
             return
         if je_produkcija(node, ["KR_IF", "L_ZAGRADA", "<izraz>", "D_ZAGRADA", "<naredba>", "KR_ELSE", "<naredba>"]):
             analyze(node.children[2], djelokrug)
             if not moze_implicitno_pretvoriti(node.children[2].tip, T_INT):
                 semanticka_greska(node)
+            if trenutna_funkcija is not None:
+                lbl = len(arm_kod)
+                arm_kod.append("    POP {R6}")
+                arm_kod.append("    CMP R6, #0")
+                arm_kod.append(f"    BEQ ELSE_{lbl}")
             analyze(node.children[4], djelokrug)
+            if trenutna_funkcija is not None:
+                arm_kod.append(f"    B END_IF_{lbl}")
+                arm_kod.append(f"ELSE_{lbl}:")
             analyze(node.children[6], djelokrug)
+            if trenutna_funkcija is not None:
+                arm_kod.append(f"END_IF_{lbl}:")
             return
         semanticka_greska(node)
 
     # <naredba_petlje>
     if je_nezavrsni(node, "<naredba_petlje>"):
         if je_produkcija(node, ["KR_WHILE", "L_ZAGRADA", "<izraz>", "D_ZAGRADA", "<naredba>"]):
+            lbl = None
+            if trenutna_funkcija is not None:
+                lbl = len(arm_kod)
+                start_lbl = f"WHILE_{lbl}"
+                end_lbl = f"END_WHILE_{lbl}"
+                arm_kod.append(f"{start_lbl}:")
+                loop_continue.append(start_lbl)
+                loop_break.append(end_lbl)
+
             analyze(node.children[2], djelokrug)
             if not moze_implicitno_pretvoriti(node.children[2].tip, T_INT):
                 semanticka_greska(node)
+
+            if trenutna_funkcija is not None:
+                arm_kod.append("    POP {R6}")
+                arm_kod.append("    CMP R6, #0")
+                arm_kod.append(f"    BEQ {loop_break[-1]}")
 
             dubina_petlje += 1
             try:
                 analyze(node.children[4], djelokrug)
             finally:
                 dubina_petlje -= 1
+
+            if trenutna_funkcija is not None:
+                arm_kod.append(f"    B {loop_continue[-1]}")
+                arm_kod.append(f"{loop_break[-1]}:")
+                loop_continue.pop()
+                loop_break.pop()
             return
 
         if je_produkcija(node, ["KR_FOR", "L_ZAGRADA", "<izraz_naredba>", "<izraz_naredba>", "D_ZAGRADA", "<naredba>"]):
+            # init
             analyze(node.children[2], djelokrug)
+            if trenutna_funkcija is not None and \
+                    je_produkcija(node.children[2], ["<izraz>", "TOCKAZAREZ"]):
+                arm_kod.append("    POP {R6}")
+
+            lbl = None
+            if trenutna_funkcija is not None:
+                lbl = len(arm_kod)
+                start_lbl = f"FOR_{lbl}"
+                end_lbl = f"END_FOR_{lbl}"
+                arm_kod.append(f"{start_lbl}:")
+                loop_continue.append(start_lbl)
+                loop_break.append(end_lbl)
+
+            # condition (izraz_naredba)
             analyze(node.children[3], djelokrug)
             if not moze_implicitno_pretvoriti(node.children[3].tip, T_INT):
                 semanticka_greska(node)
+            if trenutna_funkcija is not None and \
+                    je_produkcija(node.children[3], ["<izraz>", "TOCKAZAREZ"]):
+                arm_kod.append("    POP {R6}")
+                arm_kod.append("    CMP R6, #0")
+                arm_kod.append(f"    BEQ {loop_break[-1]}")
 
             dubina_petlje += 1
             try:
                 analyze(node.children[5], djelokrug)
             finally:
                 dubina_petlje -= 1
+
+            if trenutna_funkcija is not None:
+                arm_kod.append(f"    B {loop_continue[-1]}")
+                arm_kod.append(f"{loop_break[-1]}:")
+                loop_continue.pop()
+                loop_break.pop()
             return
 
         if je_produkcija(node, ["KR_FOR", "L_ZAGRADA", "<izraz_naredba>", "<izraz_naredba>", "<izraz>", "D_ZAGRADA", "<naredba>"]):
+            # init
             analyze(node.children[2], djelokrug)
+            if trenutna_funkcija is not None and \
+                    je_produkcija(node.children[2], ["<izraz>", "TOCKAZAREZ"]):
+                arm_kod.append("    POP {R6}")
+
+            lbl = None
+            if trenutna_funkcija is not None:
+                lbl = len(arm_kod)
+                start_lbl = f"FOR_{lbl}"
+                inc_lbl = f"FOR_INC_{lbl}"
+                end_lbl = f"END_FOR_{lbl}"
+                arm_kod.append(f"{start_lbl}:")
+                loop_continue.append(inc_lbl)
+                loop_break.append(end_lbl)
+
+            # condition (izraz_naredba)
             analyze(node.children[3], djelokrug)
             if not moze_implicitno_pretvoriti(node.children[3].tip, T_INT):
                 semanticka_greska(node)
-            analyze(node.children[4], djelokrug)
+            if trenutna_funkcija is not None and \
+                    je_produkcija(node.children[3], ["<izraz>", "TOCKAZAREZ"]):
+                arm_kod.append("    POP {R6}")
+                arm_kod.append("    CMP R6, #0")
+                arm_kod.append(f"    BEQ {loop_break[-1]}")
 
             dubina_petlje += 1
             try:
                 analyze(node.children[6], djelokrug)
             finally:
                 dubina_petlje -= 1
+
+            # increment expr
+            if trenutna_funkcija is not None:
+                arm_kod.append(f"{loop_continue[-1]}:")
+            analyze(node.children[4], djelokrug)
+            if trenutna_funkcija is not None:
+                arm_kod.append("    POP {R6}")
+
+            if trenutna_funkcija is not None:
+                arm_kod.append(f"    B {start_lbl}")
+                arm_kod.append(f"{loop_break[-1]}:")
+                loop_continue.pop()
+                loop_break.pop()
             return
 
         semanticka_greska(node)
@@ -1012,6 +1268,11 @@ def analyze(node, djelokrug):
                 je_produkcija(node, ["KR_BREAK", "TOCKAZAREZ"]):
             if dubina_petlje <= 0:
                 semanticka_greska(node)
+            if trenutna_funkcija is not None:
+                if je_produkcija(node, ["KR_CONTINUE", "TOCKAZAREZ"]):
+                    arm_kod.append(f"    B {loop_continue[-1]}")
+                else:
+                    arm_kod.append(f"    B {loop_break[-1]}")
             return
 
         if je_produkcija(node, ["KR_RETURN", "TOCKAZAREZ"]):
@@ -1031,10 +1292,10 @@ def analyze(node, djelokrug):
                 semanticka_greska(node)
 
             # arm kod za return naredbu
-            if trenutna_funkcija == "main":
+            if trenutna_funkcija is not None:
                 arm_kod.append("    POP {R6}")
                 arm_kod.append("    MOV SP, R4")
-                arm_kod.append("    POP {PC}")
+                arm_kod.append("    POP {R4, PC}")
             return
 
         semanticka_greska(node)
@@ -1080,17 +1341,20 @@ def analyze(node, djelokrug):
 
             # novi djelokrug tijela funkcije, zapocni novu funkciju u arm kodu (za sad samo main)
             stog_povratnih_tipova.append(ret)
-            if ime == "main":
+            if trenutna_funkcija is None:
                 trenutna_funkcija = ime
                 trenutna_velicina_okvira = 0
                 arm_kod.append("")
-                arm_kod.append("F_MAIN:")
-                arm_kod.append("    PUSH {LR}")
+                arm_kod.append(f"F_{ime.upper()}:")
+                arm_kod.append("    PUSH {LR, R4}")
                 arm_kod.append("    MOV R4, SP")
             node.children[5].je_tijelo_funkcije = True
             analyze(node.children[5], Djelokrug(djelokrug))
             stog_povratnih_tipova.pop()
-            if ime == "main":
+            if trenutna_funkcija == ime and ret == T_VOID:
+                arm_kod.append("    MOV SP, R4")
+                arm_kod.append("    POP {R4, PC}")
+            if trenutna_funkcija == ime:
                 trenutna_funkcija = None
             return
 
@@ -1121,13 +1385,37 @@ def analyze(node, djelokrug):
             # novi djelokrug funkcije i deklariranje parametara funkcije
             fscope = Djelokrug(djelokrug)
             for nm, tp in zip(pnames, params):
-                if not fscope.deklarirano(Simbol(nm, tp)):
+                ps = Simbol(nm, tp)
+                ps.is_param = True
+                if not fscope.deklarirano(ps):
                     semanticka_greska(node)
 
             stog_povratnih_tipova.append(ret)
+            if trenutna_funkcija is None:
+                trenutna_funkcija = ime
+                trenutna_velicina_okvira = 0
+                arm_kod.append("")
+                arm_kod.append(f"F_{ime.upper()}:")
+                arm_kod.append("    PUSH {LR, R4}")
+                arm_kod.append("    MOV R4, SP")
+                # spremi parametre iz R0..R3 na stog
+                for idx, nm in enumerate(pnames):
+                    sym = fscope.u_lokalnom_djelokrugu(nm)
+                    if sym is None:
+                        semanticka_greska(node)
+                    trenutna_velicina_okvira += 4
+                    sym.offset = -trenutna_velicina_okvira
+                    arm_kod.append("    SUB SP, SP, #4")
+                    if idx < 4:
+                        arm_kod.append(f"    STR R{idx}, [R4, #{sym.offset}]")
             node.children[5].je_tijelo_funkcije = True
             analyze(node.children[5], fscope)
             stog_povratnih_tipova.pop()
+            if trenutna_funkcija == ime and ret == T_VOID:
+                arm_kod.append("    MOV SP, R4")
+                arm_kod.append("    POP {R4, PC}")
+            if trenutna_funkcija == ime:
+                trenutna_funkcija = None
             return
 
         semanticka_greska(node)
@@ -1228,7 +1516,19 @@ def analyze(node, djelokrug):
         if je_produkcija(node, ["<izravni_deklarator>", "OP_PRIDRUZI", "<inicijalizator>"]):
             node.children[0].inh_tip = inh
             analyze(node.children[0], djelokrug)
-            analyze(node.children[2], djelokrug)
+            # za lokalne nizove s inicijalizatorom { ... } generiramo kod po elementu
+            local_array = djelokrug is not None and djelokrug.parent is not None and \
+                trenutna_funkcija is not None and is_niz(node.children[0].tip)
+            if local_array and not je_niz_znakova(node.children[2]):
+                prev_nemoj_generirati = nemoj_generirati
+                prev_trenutna_funkcija = trenutna_funkcija
+                nemoj_generirati = True
+                trenutna_funkcija = None
+                analyze(node.children[2], djelokrug)
+                nemoj_generirati = prev_nemoj_generirati
+                trenutna_funkcija = prev_trenutna_funkcija
+            else:
+                analyze(node.children[2], djelokrug)
 
             tdecl = node.children[0].tip
 
@@ -1256,24 +1556,242 @@ def analyze(node, djelokrug):
             # za generiranje arm koda za globalnu inicijalizaciju: int IDN = BROJ;
             if djelokrug is not None and djelokrug.parent is None and tdecl == T_INT:
                 name = node.children[0].ime
-                # inicijalizator mora biti BROJ (za sad)
+                # inicijalizator mora biti konstanta (BROJ, -BROJ, BROJ+BROJ) za globalne varijable
+                val = None
+                cur = node.children[2]
+                tmp = cur
+                while tmp is not None and tmp.zavrsni is None and len(tmp.children) == 1:
+                    tmp = tmp.children[0]
+                if tmp is not None and tmp.zavrsni == "BROJ":
+                    val = int(tmp.leksicka_jedinka, 0)
+                if val is None:
+                    u = cur
+                    while u is not None and u.zavrsni is None:
+                        if je_produkcija(u, ["<unarni_operator>", "<cast_izraz>"]):
+                            op = u.children[0].children[0].zavrsni
+                            if op == "OP_MINUS" or op == "MINUS":
+                                tmp2 = u.children[1]
+                                while tmp2 is not None and tmp2.zavrsni is None and len(tmp2.children) == 1:
+                                    tmp2 = tmp2.children[0]
+                                if tmp2 is not None and tmp2.zavrsni == "BROJ":
+                                    val = -int(tmp2.leksicka_jedinka, 0)
+                            break
+                        if len(u.children) == 1:
+                            u = u.children[0]
+                        else:
+                            break
+                if val is None:
+                    u = cur
+                    while u is not None and u.zavrsni is None:
+                        if len(u.children) == 3 and u.children[1].zavrsni == "PLUS":
+                            l = u.children[0]
+                            r = u.children[2]
+                            while l is not None and l.zavrsni is None and len(l.children) == 1:
+                                l = l.children[0]
+                            while r is not None and r.zavrsni is None and len(r.children) == 1:
+                                r = r.children[0]
+                            if l is not None and r is not None and l.zavrsni == "BROJ" and r.zavrsni == "BROJ":
+                                val = int(
+                                    l.leksicka_jedinka, 0) + int(r.leksicka_jedinka, 0)
+                            break
+                        if len(u.children) == 1:
+                            u = u.children[0]
+                        else:
+                            break
+                if val is not None:
+                    globalne_varijable[name] = val
+            # globalna inicijalizacija polja: int/char IDN[N] = { ... } ili "string";
+            if djelokrug is not None and djelokrug.parent is None and is_niz(tdecl) and tdecl[1] in [T_INT, T_CHAR]:
+                name = node.children[0].ime
+                n = getattr(node.children[0], "br_elem", 0)
+                values = [0] * n
+
+                list_node = None
                 cur = node.children[2]
                 while cur is not None:
-                    if cur.zavrsni == "BROJ":
-                        globalne_varijable[name] = parse_broj(
-                            cur.leksicka_jedinka)
+                    # string literal inicijalizacija
+                    if je_nezavrsni(cur, "<inicijalizator>") and je_niz_znakova(cur):
+                        # pronadi NIZ_ZNAKOVA i dekodiraj u niz vrijednosti
+                        s = None
+                        stack = [cur]
+                        while stack:
+                            x = stack.pop()
+                            if x.zavrsni == "NIZ_ZNAKOVA":
+                                s = x.leksicka_jedinka
+                                break
+                            stack.extend(x.children)
+                        if s is not None and len(s) >= 2 and s[0] == '"' and s[-1] == '"':
+                            body = s[1:-1]
+                            vals = []
+                            i = 0
+                            while i < len(body):
+                                if body[i] == "\\" and i + 1 < len(body):
+                                    esc = body[i + 1]
+                                    if esc == "t":
+                                        vals.append(ord("\t"))
+                                    elif esc == "n":
+                                        vals.append(ord("\n"))
+                                    elif esc == "0":
+                                        vals.append(0)
+                                    elif esc == "'":
+                                        vals.append(ord("'"))
+                                    elif esc == '"':
+                                        vals.append(ord('"'))
+                                    elif esc == "\\":
+                                        vals.append(ord("\\"))
+                                    else:
+                                        vals.append(ord(esc))
+                                    i += 2
+                                else:
+                                    vals.append(ord(body[i]))
+                                    i += 1
+                            vals.append(0)
+                            for i in range(min(len(vals), n)):
+                                values[i] = vals[i]
+                        globalni_nizovi[name] = values
+                        list_node = None
+                        break
+                    if je_nezavrsni(cur, "<inicijalizator>") and \
+                            je_produkcija(cur, ["L_VIT_ZAGRADA", "<lista_izraza_pridruzivanja>", "D_VIT_ZAGRADA"]):
+                        list_node = cur.children[1]
                         break
                     if len(cur.children) == 1:
                         cur = cur.children[0]
                     else:
                         break
+
+                if list_node is not None and n > 0:
+                    stack = []
+                    cur = list_node
+                    while cur is not None:
+                        if je_produkcija(cur, ["<lista_izraza_pridruzivanja>", "ZAREZ", "<izraz_pridruzivanja>"]):
+                            stack.append(cur.children[2])
+                            cur = cur.children[0]
+                            continue
+                        if je_produkcija(cur, ["<izraz_pridruzivanja>"]):
+                            stack.append(cur.children[0])
+                        break
+                    exprs = list(reversed(stack))
+
+                    for i in range(min(len(exprs), n)):
+                        expr = exprs[i]
+                        val = None
+
+                        tmp = expr
+                        while tmp is not None and tmp.zavrsni is None and len(tmp.children) == 1:
+                            tmp = tmp.children[0]
+                        if tmp is not None:
+                            val = parse_const_exp(tmp)
+
+                        if val is None:
+                            u = expr
+                            while u is not None and u.zavrsni is None:
+                                if je_produkcija(u, ["<unarni_operator>", "<cast_izraz>"]):
+                                    op = u.children[0].children[0].zavrsni
+                                    tmp2 = u.children[1]
+                                    while tmp2 is not None and tmp2.zavrsni is None and len(tmp2.children) == 1:
+                                        tmp2 = tmp2.children[0]
+                                    base = parse_const_exp(tmp2)
+                                    if base is not None:
+                                        if op == "OP_PLUS":
+                                            val = base
+                                        elif op == "OP_MINUS" or op == "MINUS":
+                                            val = -base
+                                        elif op == "OP_TILDA":
+                                            val = ~base
+                                        elif op == "OP_NEG":
+                                            val = 0 if base else 1
+                                    break
+                                if len(u.children) == 1:
+                                    u = u.children[0]
+                                else:
+                                    break
+
+                        if val is None:
+                            b = expr
+                            while b is not None and b.zavrsni is None:
+                                if len(b.children) == 3 and b.children[1].zavrsni in ["OP_PUTA", "PLUS", "MINUS"]:
+                                    op = b.children[1].zavrsni
+                                    l = b.children[0]
+                                    r = b.children[2]
+                                    while l is not None and l.zavrsni is None and len(l.children) == 1:
+                                        l = l.children[0]
+                                    while r is not None and r.zavrsni is None and len(r.children) == 1:
+                                        r = r.children[0]
+                                    lv = None
+                                    rv = None
+                                    if l is not None and l.zavrsni == "BROJ":
+                                        lv = int(l.leksicka_jedinka, 0)
+                                    if r is not None and r.zavrsni == "BROJ":
+                                        rv = int(r.leksicka_jedinka, 0)
+                                    if lv is not None and rv is not None:
+                                        if op == "OP_PUTA":
+                                            val = lv * rv
+                                        elif op == "PLUS":
+                                            val = lv + rv
+                                        elif op == "MINUS":
+                                            val = lv - rv
+                                    break
+                                if len(b.children) == 1:
+                                    b = b.children[0]
+                                else:
+                                    break
+
+                        if val is None:
+                            val = 0
+                        values[i] = val
+
+                globalni_nizovi[name] = values
             # lokalna inicijalizacija, spremi vrijednost u lokalnu varijablu
             if djelokrug is not None and djelokrug.parent is not None and trenutna_funkcija is not None:
                 name = node.children[0].ime
                 sym = djelokrug.u_nekom_djelokrugu(name)
                 if sym is not None and not getattr(sym, "is_global", False) and sym.offset is not None:
-                    arm_kod.append("    POP {R6}")
-                    arm_kod.append(f"    STR R6, [R4, #{sym.offset}]")
+                    if is_niz(sym.tip):
+                        # string literal inicijalizator: vrijednosti su vec na stogu
+                        if je_niz_znakova(node.children[2]):
+                            tipovi = getattr(node.children[2], "tipovi", None)
+                            if tipovi is not None:
+                                for i in range(len(tipovi) - 1, -1, -1):
+                                    arm_kod.append("    POP {R6}")
+                                    arm_kod.append(
+                                        f"    STR R6, [R4, #{sym.offset + i * 4}]")
+                        else:
+                            # inicijalizator { ... } s ovisnostima: evaluiraj i spremaj po elementu
+                            list_node = None
+                            cur = node.children[2]
+                            while cur is not None:
+                                if je_nezavrsni(cur, "<inicijalizator>") and \
+                                        je_produkcija(cur, ["L_VIT_ZAGRADA", "<lista_izraza_pridruzivanja>", "D_VIT_ZAGRADA"]):
+                                    list_node = cur.children[1]
+                                    break
+                                if len(cur.children) == 1:
+                                    cur = cur.children[0]
+                                else:
+                                    break
+                            if list_node is not None:
+                                stack = []
+                                cur = list_node
+                                while cur is not None:
+                                    if je_produkcija(cur, ["<lista_izraza_pridruzivanja>", "ZAREZ", "<izraz_pridruzivanja>"]):
+                                        stack.append(cur.children[2])
+                                        cur = cur.children[0]
+                                        continue
+                                    if je_produkcija(cur, ["<izraz_pridruzivanja>"]):
+                                        stack.append(cur.children[0])
+                                    break
+                                exprs = list(reversed(stack))
+                                for i in range(min(len(exprs), getattr(node.children[0], "br_elem", len(exprs)))):
+                                    prev_nemoj_generirati = nemoj_generirati
+                                    nemoj_generirati = False
+                                    analyze(exprs[i], djelokrug)
+                                    nemoj_generirati = prev_nemoj_generirati
+                                    arm_kod.append("    POP {R6}")
+                                    arm_kod.append(
+                                        f"    STR R6, [R4, #{sym.offset + i * 4}]")
+                    else:
+                        arm_kod.append("    POP {R6}")
+                        arm_kod.append(f"    STR R6, [R4, #{sym.offset}]")
             return
 
         semanticka_greska(node)
@@ -1297,8 +1815,11 @@ def analyze(node, djelokrug):
             if sym.is_global and inh == T_INT:
                 if ime not in globalne_varijable:
                     globalne_varijable[ime] = 0
+            if sym.is_global and is_niz(inh) and inh[1] in [T_INT, T_CHAR]:
+                if ime not in globalni_nizovi:
+                    globalni_nizovi[ime] = [0] * getattr(node, "br_elem", 0)
             # rezerviraj mjesto na stogu za lokalne varijable
-            if not sym.is_global and trenutna_funkcija is not None and inh == T_INT:
+            if not sym.is_global and trenutna_funkcija is not None and inh in [T_INT, T_CHAR]:
                 trenutna_velicina_okvira += 4
                 sym.offset = -trenutna_velicina_okvira
                 arm_kod.append("    SUB SP, SP, #4")
@@ -1317,12 +1838,19 @@ def analyze(node, djelokrug):
                 semanticka_greska(node)
 
             tarr = T_NIZ(inh)
-            if not djelokrug.deklarirano(Simbol(ime, tarr)):
+            sym = Simbol(ime, tarr)
+            sym.is_global = djelokrug is not None and djelokrug.parent is None
+            if not djelokrug.deklarirano(sym):
                 semanticka_greska(node)
 
             node.tip = tarr
             node.ime = ime
             node.br_elem = n
+            # rezerviraj mjesto na stogu za lokalni array
+            if not sym.is_global and trenutna_funkcija is not None and inh in [T_INT, T_CHAR]:
+                trenutna_velicina_okvira += 4 * n
+                sym.offset = -trenutna_velicina_okvira
+                arm_kod.append(f"    SUB SP, SP, #{4 * n}")
             return
 
         # deklaracija funkcije bez parametara
@@ -1408,6 +1936,39 @@ def analyze(node, djelokrug):
                 node.br_elem = L
                 node.tipovi = [T_CHAR] * L
                 node.tip = None
+
+                # arm kod za inicijalizaciju lokalnog niza iz string literal
+                if trenutna_funkcija is not None and not nemoj_generirati:
+                    s = tnode.leksicka_jedinka
+                    body = s[1:-
+                             1] if len(s) >= 2 and s[0] == '"' and s[-1] == '"' else ""
+                    vals = []
+                    i = 0
+                    while i < len(body):
+                        if body[i] == "\\" and i + 1 < len(body):
+                            esc = body[i + 1]
+                            if esc == "t":
+                                vals.append(ord("\t"))
+                            elif esc == "n":
+                                vals.append(ord("\n"))
+                            elif esc == "0":
+                                vals.append(0)
+                            elif esc == "'":
+                                vals.append(ord("'"))
+                            elif esc == '"':
+                                vals.append(ord('"'))
+                            elif esc == "\\":
+                                vals.append(ord("\\"))
+                            else:
+                                vals.append(ord(esc))
+                            i += 2
+                        else:
+                            vals.append(ord(body[i]))
+                            i += 1
+                    vals.append(0)
+                    for v in vals:
+                        arm_kod.append(f"    MOV R6, #{v}")
+                        arm_kod.append("    PUSH {R6}")
                 return
 
             node.tip = node.children[0].tip
@@ -1469,11 +2030,17 @@ def main():
             return
 
     # pisanje globalnih definicja varijabli na kraj arm koda
-    if globalne_varijable:
+    if globalne_varijable or globalni_nizovi:
         arm_kod.append("")
         arm_kod.append(".data")
         for name, val in globalne_varijable.items():
             arm_kod.append(f"{name}: .word {val}")
+        for name, vals in globalni_nizovi.items():
+            if not vals:
+                arm_kod.append(f"{name}: .word 0")
+            else:
+                arm_kod.append(f"{name}: .word " +
+                               ", ".join(str(v) for v in vals))
 
     with open("a.s", "w") as f:
         f.write("\n".join(arm_kod) + "\n")
