@@ -1325,7 +1325,19 @@ def analyze(node, djelokrug):
         if je_produkcija(node, ["<izravni_deklarator>", "OP_PRIDRUZI", "<inicijalizator>"]):
             node.children[0].inh_tip = inh
             analyze(node.children[0], djelokrug)
-            analyze(node.children[2], djelokrug)
+            # za lokalne nizove s inicijalizatorom { ... } generiramo kod po elementu
+            local_array = djelokrug is not None and djelokrug.parent is not None and \
+                trenutna_funkcija is not None and is_niz(node.children[0].tip)
+            if local_array and not je_niz_znakova(node.children[2]):
+                prev_nemoj_generirati = nemoj_generirati
+                prev_trenutna_funkcija = trenutna_funkcija
+                nemoj_generirati = True
+                trenutna_funkcija = None
+                analyze(node.children[2], djelokrug)
+                nemoj_generirati = prev_nemoj_generirati
+                trenutna_funkcija = prev_trenutna_funkcija
+            else:
+                analyze(node.children[2], djelokrug)
 
             tdecl = node.children[0].tip
 
@@ -1545,12 +1557,46 @@ def analyze(node, djelokrug):
                 sym = djelokrug.u_nekom_djelokrugu(name)
                 if sym is not None and not getattr(sym, "is_global", False) and sym.offset is not None:
                     if is_niz(sym.tip):
-                        tipovi = getattr(node.children[2], "tipovi", None)
-                        if tipovi is not None:
-                            for i in range(len(tipovi) - 1, -1, -1):
-                                arm_kod.append("    POP {R6}")
-                                arm_kod.append(
-                                    f"    STR R6, [R4, #{sym.offset + i * 4}]")
+                        # string literal inicijalizator: vrijednosti su vec na stogu
+                        if je_niz_znakova(node.children[2]):
+                            tipovi = getattr(node.children[2], "tipovi", None)
+                            if tipovi is not None:
+                                for i in range(len(tipovi) - 1, -1, -1):
+                                    arm_kod.append("    POP {R6}")
+                                    arm_kod.append(
+                                        f"    STR R6, [R4, #{sym.offset + i * 4}]")
+                        else:
+                            # inicijalizator { ... } s ovisnostima: evaluiraj i spremaj po elementu
+                            list_node = None
+                            cur = node.children[2]
+                            while cur is not None:
+                                if je_nezavrsni(cur, "<inicijalizator>") and \
+                                        je_produkcija(cur, ["L_VIT_ZAGRADA", "<lista_izraza_pridruzivanja>", "D_VIT_ZAGRADA"]):
+                                    list_node = cur.children[1]
+                                    break
+                                if len(cur.children) == 1:
+                                    cur = cur.children[0]
+                                else:
+                                    break
+                            if list_node is not None:
+                                stack = []
+                                cur = list_node
+                                while cur is not None:
+                                    if je_produkcija(cur, ["<lista_izraza_pridruzivanja>", "ZAREZ", "<izraz_pridruzivanja>"]):
+                                        stack.append(cur.children[2])
+                                        cur = cur.children[0]
+                                        continue
+                                    if je_produkcija(cur, ["<izraz_pridruzivanja>"]):
+                                        stack.append(cur.children[0])
+                                    break
+                                exprs = list(reversed(stack))
+                                for i in range(min(len(exprs), getattr(node.children[0], "br_elem", len(exprs)))):
+                                    prev_nemoj_generirati = nemoj_generirati
+                                    nemoj_generirati = False
+                                    analyze(exprs[i], djelokrug)
+                                    nemoj_generirati = prev_nemoj_generirati
+                                    arm_kod.append("    POP {R6}")
+                                    arm_kod.append(f"    STR R6, [R4, #{sym.offset + i * 4}]")
                     else:
                         arm_kod.append("    POP {R6}")
                         arm_kod.append(f"    STR R6, [R4, #{sym.offset}]")
@@ -1581,7 +1627,7 @@ def analyze(node, djelokrug):
                 if ime not in globalni_nizovi:
                     globalni_nizovi[ime] = [0] * getattr(node, "br_elem", 0)
             # rezerviraj mjesto na stogu za lokalne varijable
-            if not sym.is_global and trenutna_funkcija is not None and inh == T_INT:
+            if not sym.is_global and trenutna_funkcija is not None and inh in [T_INT, T_CHAR]:
                 trenutna_velicina_okvira += 4
                 sym.offset = -trenutna_velicina_okvira
                 arm_kod.append("    SUB SP, SP, #4")
@@ -1609,7 +1655,7 @@ def analyze(node, djelokrug):
             node.ime = ime
             node.br_elem = n
             # rezerviraj mjesto na stogu za lokalni array
-            if not sym.is_global and trenutna_funkcija is not None and inh == T_INT:
+            if not sym.is_global and trenutna_funkcija is not None and inh in [T_INT, T_CHAR]:
                 trenutna_velicina_okvira += 4 * n
                 sym.offset = -trenutna_velicina_okvira
                 arm_kod.append(f"    SUB SP, SP, #{4 * n}")
@@ -1698,6 +1744,38 @@ def analyze(node, djelokrug):
                 node.br_elem = L
                 node.tipovi = [T_CHAR] * L
                 node.tip = None
+
+                # arm kod za inicijalizaciju lokalnog niza iz string literal
+                if trenutna_funkcija is not None and not nemoj_generirati:
+                    s = tnode.leksicka_jedinka
+                    body = s[1:-1] if len(s) >= 2 and s[0] == '"' and s[-1] == '"' else ""
+                    vals = []
+                    i = 0
+                    while i < len(body):
+                        if body[i] == "\\" and i + 1 < len(body):
+                            esc = body[i + 1]
+                            if esc == "t":
+                                vals.append(ord("\t"))
+                            elif esc == "n":
+                                vals.append(ord("\n"))
+                            elif esc == "0":
+                                vals.append(0)
+                            elif esc == "'":
+                                vals.append(ord("'"))
+                            elif esc == '"':
+                                vals.append(ord('"'))
+                            elif esc == "\\":
+                                vals.append(ord("\\"))
+                            else:
+                                vals.append(ord(esc))
+                            i += 2
+                        else:
+                            vals.append(ord(body[i]))
+                            i += 1
+                    vals.append(0)
+                    for v in vals:
+                        arm_kod.append(f"    MOV R6, #{v}")
+                        arm_kod.append("    PUSH {R6}")
                 return
 
             node.tip = node.children[0].tip
