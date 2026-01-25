@@ -395,7 +395,7 @@ def analyze(node, djelokrug):
 
             # pohrana broja na stog
             if trenutna_funkcija is not None and not nemoj_generirati:
-                arm_kod.append(f"    MOV R6, #{v}")
+                arm_kod.append(f"    LDR R6, ={v}")
                 arm_kod.append("    PUSH {R6}")
             return
 
@@ -542,12 +542,12 @@ def analyze(node, djelokrug):
             node.tip = t0[2]
             node.l_izraz = 0
             if trenutna_funkcija is not None:
-                # args su na stogu, pop u R0..R3 obrnutim redoslijedom
-                for i in range(len(arg_types) - 1, -1, -1):
-                    if i < 4:
-                        arm_kod.append(f"    POP {{R{i}}}")
-                    else:
-                        arm_kod.append("    POP {R6}")
+                n = len(arg_types)
+                max_reg = min(4, n)
+                for i in range(max_reg):
+                    offset = 4 * (n - 1 - i)
+                    arm_kod.append(f"    LDR R{i}, [SP, #{offset}]")
+
                 base = node.children[0]
                 while base is not None and len(base.children) == 1 and base.nezavrsni != "<primarni_izraz>":
                     base = base.children[0]
@@ -556,6 +556,9 @@ def analyze(node, djelokrug):
                     semanticka_greska(node)
                 fname = base.children[0].leksicka_jedinka
                 arm_kod.append(f"    BL F_{fname.upper()}")
+
+                # nakon poziva makni sve argumente sa stoga
+                arm_kod.append(f"    ADD SP, SP, #{4 * n}")
                 arm_kod.append("    PUSH {R6}")
             return
 
@@ -674,9 +677,9 @@ def analyze(node, djelokrug):
                 op = node.children[0].children[0].zavrsni
                 arm_kod.append("    POP {R6}")
 
-                if op == "PLUS":
+                if op in ["PLUS", "OP_PLUS"]:
                     pass
-                elif op == "MINUS":
+                elif op in ["MINUS", "OP_MINUS"]:
                     arm_kod.append("    RSBS R6, R6, #0")
                 elif op == "OP_NEG":
                     arm_kod.append("    CMP R6, #0")
@@ -698,11 +701,11 @@ def analyze(node, djelokrug):
 
     # <unarni_operator>
     if je_nezavrsni(node, "<unarni_operator>"):
-        # u stablu se pojavljuje kao jedan nezavrsni znak OP_PLUS, OP_MINUS, OP_TILDA ili OP_NEG
+        # u stablu se pojavljuje kao jedan nezavrsni znak PLUS/MINUS ili OP_PLUS/OP_MINUS, OP_TILDA, OP_NEG
         if len(node.children) != 1 or node.children[0].zavrsni is None:
             semanticka_greska(node)
         op = node.children[0].zavrsni
-        if op not in ["OP_PLUS", "OP_MINUS", "OP_TILDA", "OP_NEG"]:
+        if op not in ["PLUS", "MINUS", "OP_PLUS", "OP_MINUS", "OP_TILDA", "OP_NEG"]:
             semanticka_greska(node)
         return
 
@@ -772,32 +775,80 @@ def analyze(node, djelokrug):
             # arm kod za mnozenje, dijeljenje i mod
             if trenutna_funkcija is not None:
                 op = node.children[1].zavrsni
-                arm_kod.append("    POP {R0}")
-                arm_kod.append("    POP {R1}")
+                arm_kod.append("    POP {R0}")  # desni operand (divisor)
+                arm_kod.append("    POP {R1}")  # lijevi operand (dividend)")
                 if op == "OP_PUTA":
                     arm_kod.append("    MUL R6, R1, R0")
                 elif op == "OP_DIJELI":
-                    arm_kod.append("    MOV R2, #0")
-                    arm_kod.append("    MOV R3, R1")
                     lbl = len(arm_kod)
+                    # R1 = dividend, R0 = divisor
+                    arm_kod.append("    MOV R2, #0")   # sign
+                    arm_kod.append("    MOV R3, R0")   # abs(divisor)")
+                    # abs(dividend) u R1
+                    arm_kod.append("    CMP R1, #0")
+                    arm_kod.append(f"    BGE DIV_ABS_DIV_{lbl}")
+                    arm_kod.append("    RSBS R1, R1, #0")
+                    arm_kod.append("    EOR R2, R2, #1")
+                    arm_kod.append(f"DIV_ABS_DIV_{lbl}:")
+                    # abs(divisor) u R3
+                    arm_kod.append("    CMP R3, #0")
+                    arm_kod.append(f"    BGE DIV_ABS_DIVISOR_{lbl}")
+                    arm_kod.append("    RSBS R3, R3, #0")
+                    arm_kod.append("    EOR R2, R2, #1")
+                    arm_kod.append(f"DIV_ABS_DIVISOR_{lbl}:")
+                    arm_kod.append("    MOV R6, #0")   # quotient
                     arm_kod.append(f"DIV_LOOP_{lbl}:")
-                    arm_kod.append("    CMP R3, R0")
+                    arm_kod.append("    CMP R1, R3")
                     arm_kod.append(f"    BLT DIV_DONE_{lbl}")
-                    arm_kod.append("    SUB R3, R3, R0")
-                    arm_kod.append("    ADD R2, R2, #1")
+                    arm_kod.append("    SUB R1, R1, R3")
+                    arm_kod.append("    ADD R6, R6, #1")
                     arm_kod.append(f"    B DIV_LOOP_{lbl}")
                     arm_kod.append(f"DIV_DONE_{lbl}:")
-                    arm_kod.append("    MOV R6, R2")
-                else:
-                    arm_kod.append("    MOV R3, R1")
+                    arm_kod.append("    CMP R2, #0")
+                    arm_kod.append(f"    BEQ DIV_END_{lbl}")
+                    arm_kod.append("    RSBS R6, R6, #0")
+                    arm_kod.append(f"DIV_END_{lbl}:")
+                else:  # OP_MOD
                     lbl = len(arm_kod)
-                    arm_kod.append(f"MOD_LOOP_{lbl}:")
-                    arm_kod.append("    CMP R3, R0")
-                    arm_kod.append(f"    BLT MOD_DONE_{lbl}")
-                    arm_kod.append("    SUB R3, R3, R0")
-                    arm_kod.append(f"    B MOD_LOOP_{lbl}")
-                    arm_kod.append(f"MOD_DONE_{lbl}:")
-                    arm_kod.append("    MOV R6, R3")
+                    # Sačuvaj originalne operande
+                    arm_kod.append("    PUSH {R1}")     # original dividend
+                    arm_kod.append("    PUSH {R0}")     # original divisor
+
+                    # izračunaj kvocijent kao kod OP_DIJELI (trunciranje prema 0)
+                    arm_kod.append("    MOV R2, #0")   # sign
+                    arm_kod.append("    MOV R3, R0")   # abs(divisor)")
+                    # abs(dividend) u R1
+                    arm_kod.append("    CMP R1, #0")
+                    arm_kod.append(f"    BGE MOD_ABS_DIV_{lbl}")
+                    arm_kod.append("    RSBS R1, R1, #0")
+                    arm_kod.append("    EOR R2, R2, #1")
+                    arm_kod.append(f"MOD_ABS_DIV_{lbl}:")
+                    # abs(divisor) u R3
+                    arm_kod.append("    CMP R3, #0")
+                    arm_kod.append(f"    BGE MOD_ABS_DIVISOR_{lbl}")
+                    arm_kod.append("    RSBS R3, R3, #0")
+                    arm_kod.append("    EOR R2, R2, #1")
+                    arm_kod.append(f"MOD_ABS_DIVISOR_{lbl}:")
+                    arm_kod.append("    MOV R6, #0")   # quotient
+                    arm_kod.append(f"MOD_DIV_LOOP_{lbl}:")
+                    arm_kod.append("    CMP R1, R3")
+                    arm_kod.append(f"    BLT MOD_DIV_DONE_{lbl}")
+                    arm_kod.append("    SUB R1, R1, R3")
+                    arm_kod.append("    ADD R6, R6, #1")
+                    arm_kod.append(f"    B MOD_DIV_LOOP_{lbl}")
+                    arm_kod.append(f"MOD_DIV_DONE_{lbl}:")
+                    arm_kod.append("    CMP R2, #0")
+                    arm_kod.append(f"    BEQ MOD_DIV_END_{lbl}")
+                    arm_kod.append("    RSBS R6, R6, #0")  # kvocijent sa znakom
+                    arm_kod.append(f"MOD_DIV_END_{lbl}:")
+
+                    # R6 = kvocijent; vrati originalne operande
+                    arm_kod.append("    POP {R2}")       # original divisor
+                    arm_kod.append("    POP {R3}")       # original dividend
+
+                    # remainder = dividend - quotient*divisor
+                    arm_kod.append("    MUL R0, R6, R2")  # R0 = quotient * divisor
+                    arm_kod.append("    SUB R6, R3, R0")  # remainder
                 arm_kod.append("    PUSH {R6}")
             return
         semanticka_greska(node)
@@ -1396,9 +1447,10 @@ def analyze(node, djelokrug):
                 trenutna_velicina_okvira = 0
                 arm_kod.append("")
                 arm_kod.append(f"F_{ime.upper()}:")
-                arm_kod.append("    PUSH {LR, R4}")
+                arm_kod.append("    PUSH {R4, LR}")
                 arm_kod.append("    MOV R4, SP")
-                # spremi parametre iz R0..R3 na stog
+                # spremi parametre (prva 4 iz registara, ostale sa stoga)
+                n = len(pnames)
                 for idx, nm in enumerate(pnames):
                     sym = fscope.u_lokalnom_djelokrugu(nm)
                     if sym is None:
@@ -1408,6 +1460,10 @@ def analyze(node, djelokrug):
                     arm_kod.append("    SUB SP, SP, #4")
                     if idx < 4:
                         arm_kod.append(f"    STR R{idx}, [R4, #{sym.offset}]")
+                    else:
+                        extra_off = 8 + 4 * (n - 1 - idx)
+                        arm_kod.append(f"    LDR R6, [R4, #{extra_off}]")
+                        arm_kod.append(f"    STR R6, [R4, #{sym.offset}]")
             node.children[5].je_tijelo_funkcije = True
             analyze(node.children[5], fscope)
             stog_povratnih_tipova.pop()
@@ -1553,33 +1609,47 @@ def analyze(node, djelokrug):
 
             node.tip = tdecl
 
-            # za generiranje arm koda za globalnu inicijalizaciju: int IDN = BROJ;
-            if djelokrug is not None and djelokrug.parent is None and tdecl == T_INT:
+            # za generiranje arm koda za globalnu inicijalizaciju: int/char IDN = konstanta;
+            if djelokrug is not None and djelokrug.parent is None and tdecl in [T_INT, T_CHAR]:
                 name = node.children[0].ime
-                # inicijalizator mora biti konstanta (BROJ, -BROJ, BROJ+BROJ) za globalne varijable
                 val = None
                 cur = node.children[2]
+
+                # 1) jednostavan literal (BROJ ili ZNAK)
                 tmp = cur
                 while tmp is not None and tmp.zavrsni is None and len(tmp.children) == 1:
                     tmp = tmp.children[0]
-                if tmp is not None and tmp.zavrsni == "BROJ":
-                    val = int(tmp.leksicka_jedinka, 0)
+                if tmp is not None:
+                    v0 = parse_const_exp(tmp)
+                    if v0 is not None:
+                        val = v0
+
+                # 2) unarni operator nad konstantom: +k, -k, ~k, !k
                 if val is None:
                     u = cur
                     while u is not None and u.zavrsni is None:
                         if je_produkcija(u, ["<unarni_operator>", "<cast_izraz>"]):
                             op = u.children[0].children[0].zavrsni
-                            if op == "OP_MINUS" or op == "MINUS":
-                                tmp2 = u.children[1]
-                                while tmp2 is not None and tmp2.zavrsni is None and len(tmp2.children) == 1:
-                                    tmp2 = tmp2.children[0]
-                                if tmp2 is not None and tmp2.zavrsni == "BROJ":
-                                    val = -int(tmp2.leksicka_jedinka, 0)
+                            tmp2 = u.children[1]
+                            while tmp2 is not None and tmp2.zavrsni is None and len(tmp2.children) == 1:
+                                tmp2 = tmp2.children[0]
+                            base = parse_const_exp(tmp2)
+                            if base is not None:
+                                if op == "OP_PLUS":
+                                    val = base
+                                elif op == "OP_MINUS" or op == "MINUS":
+                                    val = -base
+                                elif op == "OP_TILDA":
+                                    val = ~base
+                                elif op == "OP_NEG":
+                                    val = 0 if base else 1
                             break
                         if len(u.children) == 1:
                             u = u.children[0]
                         else:
                             break
+
+                # 3) binarni + između konstanti: k1 + k2
                 if val is None:
                     u = cur
                     while u is not None and u.zavrsni is None:
@@ -1590,17 +1660,19 @@ def analyze(node, djelokrug):
                                 l = l.children[0]
                             while r is not None and r.zavrsni is None and len(r.children) == 1:
                                 r = r.children[0]
-                            if l is not None and r is not None and l.zavrsni == "BROJ" and r.zavrsni == "BROJ":
-                                val = int(
-                                    l.leksicka_jedinka, 0) + int(r.leksicka_jedinka, 0)
+                            lv = parse_const_exp(l) if l is not None else None
+                            rv = parse_const_exp(r) if r is not None else None
+                            if lv is not None and rv is not None:
+                                val = lv + rv
                             break
                         if len(u.children) == 1:
                             u = u.children[0]
                         else:
                             break
+
                 if val is not None:
                     globalne_varijable[name] = val
-            # globalna inicijalizacija polja: int/char IDN[N] = { ... } ili "string";
+
             if djelokrug is not None and djelokrug.parent is None and is_niz(tdecl) and tdecl[1] in [T_INT, T_CHAR]:
                 name = node.children[0].ime
                 n = getattr(node.children[0], "br_elem", 0)
@@ -1812,9 +1884,10 @@ def analyze(node, djelokrug):
             node.ime = ime
 
             # za arm kod, rezerviraj mjesto za globalne varijable bez inicijalizacije
-            if sym.is_global and inh == T_INT:
+            if sym.is_global and inh in [T_INT, T_CHAR]:
                 if ime not in globalne_varijable:
                     globalne_varijable[ime] = 0
+
             if sym.is_global and is_niz(inh) and inh[1] in [T_INT, T_CHAR]:
                 if ime not in globalni_nizovi:
                     globalni_nizovi[ime] = [0] * getattr(node, "br_elem", 0)
@@ -1846,6 +1919,10 @@ def analyze(node, djelokrug):
             node.tip = tarr
             node.ime = ime
             node.br_elem = n
+
+            if sym.is_global and inh in [T_INT, T_CHAR]:
+                if ime not in globalni_nizovi:
+                    globalni_nizovi[ime] = [0] * n
             # rezerviraj mjesto na stogu za lokalni array
             if not sym.is_global and trenutna_funkcija is not None and inh in [T_INT, T_CHAR]:
                 trenutna_velicina_okvira += 4 * n
