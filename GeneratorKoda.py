@@ -810,45 +810,23 @@ def analyze(node, djelokrug):
                     arm_kod.append(f"DIV_END_{lbl}:")
                 else:  # OP_MOD
                     lbl = len(arm_kod)
-                    # Sačuvaj originalne operande
-                    arm_kod.append("    PUSH {R1}")     # original dividend
-                    arm_kod.append("    PUSH {R0}")     # original divisor
-
-                    # izračunaj kvocijent kao kod OP_DIJELI (trunciranje prema 0)
-                    arm_kod.append("    MOV R2, #0")   # sign
-                    arm_kod.append("    MOV R3, R0")   # abs(divisor)")
-                    # abs(dividend) u R1
+                    # modulo koristi apsolutne vrijednosti (rezultat je >= 0)
+                    arm_kod.append("    MOV R3, R0")
                     arm_kod.append("    CMP R1, #0")
                     arm_kod.append(f"    BGE MOD_ABS_DIV_{lbl}")
                     arm_kod.append("    RSBS R1, R1, #0")
-                    arm_kod.append("    EOR R2, R2, #1")
                     arm_kod.append(f"MOD_ABS_DIV_{lbl}:")
-                    # abs(divisor) u R3
                     arm_kod.append("    CMP R3, #0")
                     arm_kod.append(f"    BGE MOD_ABS_DIVISOR_{lbl}")
                     arm_kod.append("    RSBS R3, R3, #0")
-                    arm_kod.append("    EOR R2, R2, #1")
                     arm_kod.append(f"MOD_ABS_DIVISOR_{lbl}:")
-                    arm_kod.append("    MOV R6, #0")   # quotient
                     arm_kod.append(f"MOD_DIV_LOOP_{lbl}:")
                     arm_kod.append("    CMP R1, R3")
                     arm_kod.append(f"    BLT MOD_DIV_DONE_{lbl}")
                     arm_kod.append("    SUB R1, R1, R3")
-                    arm_kod.append("    ADD R6, R6, #1")
                     arm_kod.append(f"    B MOD_DIV_LOOP_{lbl}")
                     arm_kod.append(f"MOD_DIV_DONE_{lbl}:")
-                    arm_kod.append("    CMP R2, #0")
-                    arm_kod.append(f"    BEQ MOD_DIV_END_{lbl}")
-                    arm_kod.append("    RSBS R6, R6, #0")  # kvocijent sa znakom
-                    arm_kod.append(f"MOD_DIV_END_{lbl}:")
-
-                    # R6 = kvocijent; vrati originalne operande
-                    arm_kod.append("    POP {R2}")       # original divisor
-                    arm_kod.append("    POP {R3}")       # original dividend
-
-                    # remainder = dividend - quotient*divisor
-                    arm_kod.append("    MUL R0, R6, R2")  # R0 = quotient * divisor
-                    arm_kod.append("    SUB R6, R3, R0")  # remainder
+                    arm_kod.append("    MOV R6, R1")  # ostatak
                 arm_kod.append("    PUSH {R6}")
             return
         semanticka_greska(node)
